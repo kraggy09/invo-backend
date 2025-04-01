@@ -1,12 +1,10 @@
 import express, { Express, Request, Response } from "express";
 import cors from "cors";
-import helmet from "helmet";
 import morgan from "morgan";
+import chalk from "chalk";
 
 const app: Express = express();
 
-// Security middleware
-app.use(helmet());
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -14,8 +12,31 @@ app.use(
   })
 );
 
-// Logging middleware
-app.use(morgan("dev"));
+const colorizeLog = (status: string, log: string) => {
+  if (status.startsWith("404")) return chalk.red.bold(log);
+  if (status.startsWith("2")) return chalk.green.bold(log);
+  if (status.startsWith("4")) return chalk.yellow.bold(log);
+  if (status.startsWith("5")) return chalk.red.bold(log);
+  return chalk.white(log);
+};
+
+morgan.token("body", (req: Request) => JSON.stringify(req.body || {}));
+
+morgan.format("colored", (tokens, req: Request, res: Response) => {
+  const status = tokens.status(req, res) || "000"; // Handle undefined cases
+  const log = [
+    tokens.method(req, res),
+    tokens.url(req, res),
+    status,
+    tokens["response-time"](req, res) + "ms",
+    "- Body:",
+    tokens.body(req, res),
+  ].join(" ");
+
+  return colorizeLog(status, log);
+});
+
+app.use(morgan("colored"));
 
 // Body parsing middleware
 app.use(express.json());

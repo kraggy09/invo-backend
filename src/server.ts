@@ -1,9 +1,12 @@
 import app from "./app";
 import http from "http";
 import configureSocketIO from "./config/socket.config";
+import connection from "./db/dbConfig";
 const PORT = process.env.PORT || 5000;
-import {} from "crypto";
+const url = process.env.MONGODB_URI as string;
 
+// const abc = "";
+// abc = [];
 export const instanceId = crypto.randomUUID();
 const server = http.createServer(app);
 server.listen(PORT, async () => {
@@ -11,6 +14,7 @@ server.listen(PORT, async () => {
   console.log(`🚀 Instance ID: ${instanceId}`);
 
   try {
+    await connection(url);
     const io = await configureSocketIO(server);
     console.log("✅ Socket.IO configured successfully!");
 
