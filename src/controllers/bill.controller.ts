@@ -8,6 +8,7 @@ import Logger from "../models/logger.model";
 import Bill from "../models/bill.model";
 import Transaction from "../models/transaction.model";
 import moment from "moment-timezone";
+import { ApiError } from "../utils";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createBill = async (req: Request, res: Response) => {
@@ -32,21 +33,21 @@ export const createBill = async (req: Request, res: Response) => {
       }).session(session);
 
       if (!previousTransactionId || !previousBillId) {
-        return ApiResponse(res, 400, false, "Previous transactio id not found");
+        throw new ApiError(404, "Previous transactionid or bill id not found");
       }
 
       if (previousTransactionId.value != transactionId) {
-        throw new Error("Duplicate Transaction !! Pls refresh");
+        throw new ApiError(400, "Duplicate Transaction !! Pls refresh");
       }
 
       if (previousBillId.value != billId) {
         console.log(previousBillId, billId, "Actual BIll Id");
-        throw new Error("Duplicate bill !! Pls refresh");
+        throw new ApiError(400, "Duplicate bill !! Pls refresh");
       }
 
       const customer = await Customer.findById(customerId).session(session);
       if (!customer) {
-        throw new Error("Customer not found");
+        throw new ApiError(404, "Customer not found");
       }
 
       let billTotal = 0;
@@ -103,7 +104,7 @@ export const createBill = async (req: Request, res: Response) => {
       });
 
       if (bulkWriteResult.modifiedCount !== products.length) {
-        throw new Error("Failed to update all product stocks");
+        throw new ApiError(401, "Failed to update all product stocks");
       }
 
       await Logger.insertMany(loggerEntries, { session });
@@ -117,7 +118,7 @@ export const createBill = async (req: Request, res: Response) => {
       );
 
       if (!newBillId) {
-        throw new Error("Error while creating bill id");
+        throw new ApiError(403, "Error while creating bill id");
       }
 
       const newBill = await Bill.create(
@@ -136,7 +137,7 @@ export const createBill = async (req: Request, res: Response) => {
       );
 
       if (!newBill[0]) {
-        throw new Error("Unable to create the bill");
+        throw new ApiError(401, "Unable to create the bill");
       }
 
       let transaction = null;
@@ -149,7 +150,7 @@ export const createBill = async (req: Request, res: Response) => {
           { new: true, session }
         );
         if (!newTransId) {
-          return ApiResponse(res, 400, false, "Transaction id not found");
+          throw new ApiError(401, "Unbale to find the transaction id");
         }
         transaction = await Transaction.create(
           [
@@ -170,7 +171,7 @@ export const createBill = async (req: Request, res: Response) => {
         );
 
         if (!transaction[0]) {
-          throw new Error("Unable to create the transaction");
+          throw new ApiError(400, "Unable to create the transaction");
         }
       }
 
@@ -183,7 +184,10 @@ export const createBill = async (req: Request, res: Response) => {
       );
 
       if (!updatedCustomer) {
-        throw new Error("Unable to update the customer's outstanding balance");
+        throw new ApiError(
+          400,
+          "Unable to update the customer's outstanding balance"
+        );
       }
 
       return {
@@ -197,6 +201,9 @@ export const createBill = async (req: Request, res: Response) => {
       bill: result,
     });
   } catch (error: any) {
+    if (error instanceof ApiError) {
+      return ApiResponse(res, error.statusCode, false, error.message);
+    }
     return ApiResponse(res, 500, false, error.message || "Server error");
   } finally {
     session.endSession();

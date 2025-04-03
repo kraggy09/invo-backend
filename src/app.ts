@@ -2,6 +2,13 @@ import express, { Express, Request, Response } from "express";
 import cors from "cors";
 import morgan from "morgan";
 import chalk from "chalk";
+import userRouter from "./routes/user.route";
+import productRouter from "./routes/product.route";
+import billRouter from "./routes/bill.route";
+import customerRouter from "./routes/customer.route";
+import transactionRouter from "./routes/transaction.route";
+import stockRouter from "./routes/stock.route";
+import categoryRouter from "./routes/category.route";
 
 const app: Express = express();
 
@@ -41,6 +48,14 @@ app.use(morgan("colored"));
 // Body parsing middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+app.use("/api/v1", userRouter);
+app.use("/api/v1", productRouter);
+app.use("/api/v1", billRouter);
+app.use("/api/v1", customerRouter);
+app.use("/api/v1", transactionRouter);
+app.use("/api/v1", stockRouter);
+app.use("/api/v1", categoryRouter);
 
 // Basic route
 app.get("/", (req: Request, res: Response) => {

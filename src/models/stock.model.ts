@@ -16,6 +16,11 @@ const stockSchema = new Schema<IStock>({
     ref: "User",
     required: true,
   },
+  approved: {
+    type: Boolean,
+    required: true,
+    default: false,
+  },
   approvedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",

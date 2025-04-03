@@ -1,6 +1,11 @@
-import mongoose, { Schema } from "mongoose";
+import mongoose, { Schema, Document } from "mongoose";
 
-const aclSchema = new Schema({
+export interface IACL extends Document {
+  name: string;
+  description: string;
+}
+
+const aclSchema = new Schema<IACL>({
   name: {
     type: String,
     required: true,

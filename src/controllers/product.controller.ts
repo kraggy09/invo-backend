@@ -2,13 +2,23 @@ import axios from "axios";
 import { Request, Response } from "express";
 import Product from "../models/product.model";
 import ApiResponse from "../utils/ApiResponse";
-import { getDate } from "../utils";
+import {
+  ApiError,
+  getCurrentDateAndTime,
+  getDate,
+  getServerErrorLog,
+} from "../utils";
 import mongoose from "mongoose";
 import Counter from "../models/counter.model";
 import Logger from "../models/logger.model";
 import Customer from "../models/customer.model";
 import Transaction from "../models/transaction.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import { IStock } from "../types/stock.type";
+import Stock from "../models/stock.model";
+import moment from "moment-timezone";
+
+const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createNewProduct = async (req: Request, res: Response) => {
   try {
@@ -253,31 +263,21 @@ export const updateProductDetails = async (req: Request, res: Response) => {
 
 export const deleteProduct = async (req: Request, res: Response) => {
   try {
-    const product = req.params;
-    console.log(product);
+    const productId = req.params;
+    console.log(productId);
 
-    if (product.barcode) {
-      const deletedProduct = await Product.findOneAndDelete({
-        barcode: product.barcode,
+    if (productId) {
+      const deletedProduct = await Product.findByIdAndDelete({
+        productId,
       });
       if (deletedProduct) {
-        return res.status(200).json({
-          success: true,
-          data: deletedProduct,
-          msg: "Product deleted successfully",
-        });
+        return ApiResponse(res, 201, true, "Product deleted successfully");
       }
     }
 
-    return res.status(400).json({
-      success: false,
-      msg: "No product found ",
-    });
+    return ApiResponse(res, 404, false, "Product not found");
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      msg: error.message,
-    });
+    return ApiResponse(res, 500, false, error.message || "Server error");
   }
 };
 
@@ -286,7 +286,10 @@ export const returnProduct = async (
   res: Response
 ) => {
   const abc = req.body;
-  const currentDate = getDate();
+  const user = req.user;
+  if (!user) {
+    return ApiResponse(res, 401, false, "Unauthorised user");
+  }
   let { purchased, foundCustomer, billId, transactionId, returnType, total } =
     abc;
 
@@ -302,29 +305,19 @@ export const returnProduct = async (
       }).session(session);
 
       if (!previousBillId || !previousTransactionId) {
-        return ApiResponse(
-          res,
-          404,
-          false,
-          "TransactionId or BillId not found"
-        );
+        throw new ApiError(404, "TransactionId or BillId not found");
       }
 
       if (previousBillId.value !== billId) {
-        return ApiResponse(res, 400, false, "Duplicate bill !! Pls refresh");
+        throw new ApiError(400, "Duplicate bill !! Pls refresh");
       }
 
       if (previousTransactionId.value !== transactionId) {
-        return ApiResponse(
-          res,
-          400,
-          false,
-          "Duplicate Transaction !! Pls refresh"
-        );
+        throw new ApiError(400, "Duplicate Transaction !! Pls refresh");
       }
 
       if (purchased.length === 0) {
-        return ApiResponse(res, 400, false, "No products to return");
+        throw new ApiError(400, "No products to return");
       }
 
       // Prepare bulk operations for product stock updates and logger entries
@@ -351,10 +344,8 @@ export const returnProduct = async (
         // Fetch product details for logging
         const availableProduct = await Product.findById(id).session(session);
         if (!availableProduct) {
-          return ApiResponse(
-            res,
+          throw new ApiError(
             404,
-            false,
             `Product not found: ${product.name || product.id}`
           );
         }
@@ -381,12 +372,7 @@ export const returnProduct = async (
         session,
       });
       if (bulkWriteResult.modifiedCount !== purchased.length) {
-        return ApiResponse(
-          res,
-          500,
-          false,
-          "Failed to update all product stocks"
-        );
+        throw new ApiError(500, "Failed to update all product stocks");
       }
 
       // Insert logger entries in bulk
@@ -400,7 +386,7 @@ export const returnProduct = async (
           session
         );
         if (!foundCustomer) {
-          return ApiResponse(res, 404, false, "Customer not found");
+          throw new ApiError(404, "Customer not found");
         }
 
         const newOutstanding = foundCustomer.outstanding - total;
@@ -412,12 +398,7 @@ export const returnProduct = async (
         );
 
         if (!newTransactionId) {
-          return ApiResponse(
-            res,
-            500,
-            false,
-            "Unable to create transaction id"
-          );
+          throw new ApiError(500, "Unable to create transaction id");
         }
 
         // Create transaction
@@ -429,7 +410,7 @@ export const returnProduct = async (
               previousOutstanding: foundCustomer.outstanding,
               amount: total,
               newOutstanding,
-              approvedBy: req.user._id,
+              approvedBy: req.user?.id,
               taken: false,
               purpose: "Return Product",
               paymentMode: "productReturn",
@@ -441,12 +422,7 @@ export const returnProduct = async (
         );
 
         if (!transaction[0]) {
-          return ApiResponse(
-            res,
-            500,
-            false,
-            "Unable to create the transaction"
-          );
+          throw new ApiError(500, "Unable to create the transaction");
         }
 
         // Update customer outstanding balance
@@ -457,10 +433,8 @@ export const returnProduct = async (
         );
 
         if (!updatedCustomer) {
-          return ApiResponse(
-            res,
+          throw new ApiError(
             500,
-            false,
             "Unable to update customer's outstanding balance"
           );
         }
@@ -472,19 +446,14 @@ export const returnProduct = async (
         );
 
         if (!newTransactionId) {
-          return ApiResponse(
-            res,
-            500,
-            false,
-            "Unable to create transaction id"
-          );
+          throw new ApiError(500, "Unable to create transaction id");
         }
 
         transaction = await Transaction.create(
           [
             {
               id: newTransactionId.value,
-              name: "Product Return",
+              name: "PRODUCT_ReTURN",
               amount: total,
               taken: true,
               purpose: "return",
@@ -496,39 +465,33 @@ export const returnProduct = async (
         );
 
         if (!transaction[0]) {
-          return ApiResponse(
-            res,
-            500,
-            false,
-            "Unable to create the transaction"
-          );
+          throw new ApiError(500, "Unable to create the transaction");
         }
       }
 
-      // Update daily report correctly here
-      const dailyReport = await DailyReport.findOneAndUpdate(
-        { date: currentDate },
-        {
-          $push: {
-            updatedToday: items.map((item) => ({
-              product: item.product,
-              quantity: item.quantity,
-              previousQuantity: item.previousQuantity,
-              purpose: "Product Return",
-            })),
-            transactions: transaction[0]._id,
+      const updateStockRequest = items.map((item) => ({
+        insertOne: {
+          document: {
+            approvedBy: user._id,
+            product: item.product,
+            oldStock: item.previousQuantity,
+            stockAtUpdate: item.previousQuantity,
+            quantity: item.quantity,
+            newStock: item.previousQuantity + item.quantity,
+            approved: true,
+            purpose: "PRODUCT_RETURN",
+            createdBy: user._id,
+            date: moment.tz(getCurrentDateAndTime(), IST),
           },
         },
-        { upsert: true, new: true, session }
-      );
+      }));
 
-      if (!dailyReport) {
-        return ApiResponse(
-          res,
-          500,
-          false,
-          "Unable to update the daily report"
-        );
+      const updateStockInBulk = await Stock.bulkWrite(updateStockRequest, {
+        session,
+      });
+
+      if (updateStockInBulk.insertedCount !== items.length) {
+        throw new ApiError(500, "Failed to insert stock records");
       }
 
       let newBillId = await Counter.findOneAndUpdate(
@@ -538,18 +501,16 @@ export const returnProduct = async (
       );
 
       if (!newBillId) {
-        return ApiResponse(res, 500, false, "Unable to create the bill id");
+        throw new ApiError(500, "Unable to create the bill id");
       }
 
       // Success response
       return ApiResponse(res, 200, true, "Updated successfully", {
         transaction,
-        dailyReport,
       });
     });
   } catch (error: any) {
-    console.error("Error during transaction:", error.message);
-    return ApiResponse(res, 500, false, error.message);
+    return getServerErrorLog(res, error);
   } finally {
     // End session
     session.endSession();
