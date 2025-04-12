@@ -4,6 +4,28 @@ import { Request, Response } from "express";
 import User from "../models/user.model";
 import ApiResponse from "../utils/ApiResponse";
 import { generateToken } from "../services/token.service";
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+
+export const checkAuth = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user;
+    if (!user) {
+      return ApiResponse(res, 401, false, "Unauthorized");
+    }
+    const userId = user._id as string;
+    const token = await generateToken(userId);
+    const userWithoutPassword = user.toObject();
+    delete userWithoutPassword.password; // Remove password from the response
+    return ApiResponse(res, 200, true, "User authenticated successfully", {
+      user: userWithoutPassword,
+
+      token,
+    });
+  } catch (error) {
+    console.error("Error in checkAuth:", error);
+    return ApiResponse(res, 500, false, "Internal Server Error", error);
+  }
+};
 
 export const login = async (req: Request, res: Response) => {
   const session = await mongoose.startSession();
@@ -11,6 +33,7 @@ export const login = async (req: Request, res: Response) => {
 
   try {
     const { username, password } = req.body;
+    console.log(username, password);
 
     // Finding user with username
     const user = await User.findOne({ username }).session(session);
@@ -52,6 +75,8 @@ export const login = async (req: Request, res: Response) => {
       token,
     });
   } catch (error: any) {
+    console.log(error);
+
     await session.abortTransaction();
     session.endSession();
     return ApiResponse(res, 500, false, "Internal Server Error", error.message);

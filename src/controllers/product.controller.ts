@@ -264,8 +264,6 @@ export const updateProductDetails = async (req: Request, res: Response) => {
 export const deleteProduct = async (req: Request, res: Response) => {
   try {
     const productId = req.params;
-    console.log(productId);
-
     if (productId) {
       const deletedProduct = await Product.findByIdAndDelete({
         productId,

@@ -9,6 +9,8 @@ import Bill from "../models/bill.model";
 import Transaction from "../models/transaction.model";
 import moment from "moment-timezone";
 import { ApiError } from "../utils";
+import { pubClient } from "../config/redis.config";
+import { EVENTS_MAP } from "../constant/redisMap";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createBill = async (req: Request, res: Response) => {
@@ -41,7 +43,6 @@ export const createBill = async (req: Request, res: Response) => {
       }
 
       if (previousBillId.value != billId) {
-        console.log(previousBillId, billId, "Actual BIll Id");
         throw new ApiError(400, "Duplicate bill !! Pls refresh");
       }
 
@@ -196,7 +197,11 @@ export const createBill = async (req: Request, res: Response) => {
         transaction,
       };
     });
-
+    await pubClient.publish(EVENTS_MAP.BILL_CREATED, JSON.stringify(result));
+    await pubClient.publish(
+      EVENTS_MAP.BILL_CREATION_NOTIFICATION,
+      JSON.stringify(result)
+    );
     return ApiResponse(res, 201, true, "Bill created successfully", {
       bill: result,
     });
