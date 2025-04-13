@@ -6,6 +6,7 @@ import {
   getAllTransactions,
   getLatestTransactionId,
   rejectTransaction,
+  getAllTransactionsInDateRange,
 } from "../controllers/transaction.controller";
 const transactionRouter = express.Router();
 
@@ -15,5 +16,6 @@ transactionRouter.route("/getTransactionForApproval").get(getAllTransactions);
 transactionRouter.route("/approveTransaction").post(approveTransaction);
 transactionRouter.route("/rejectTransaction").post(rejectTransaction);
 transactionRouter.route("/getLatestTransactionId").get(getLatestTransactionId);
+transactionRouter.route("/get-transactions").get(getAllTransactionsInDateRange);
 
 export default transactionRouter;

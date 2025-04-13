@@ -314,3 +314,43 @@ export const getLatestTransactionId = async (req: Request, res: Response) => {
     return ApiResponse(res, 500, false, error.message || "Server Error");
   }
 };
+
+export const getAllTransactionsInDateRange = async (
+  req: Request,
+  res: Response
+) => {
+  const { startDate, endDate } = req.query;
+
+  if (!startDate || !endDate) {
+    return ApiResponse(
+      res,
+      400,
+      false,
+      "Please provide both startDate and endDate"
+    );
+  }
+  try {
+    const transactions = await Transaction.find({
+      createdAt: {
+        $gte: startDate,
+        $lte: endDate,
+      },
+    });
+
+    if (transactions.length === 0) {
+      return ApiResponse(
+        res,
+        200,
+        true,
+        "No transactions found in this range",
+        { transactions: [] }
+      );
+    }
+
+    return ApiResponse(res, 200, true, "Transactions found successfully", {
+      transactions,
+    });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message || "Server Error");
+  }
+};

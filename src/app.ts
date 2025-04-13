@@ -50,10 +50,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api/v1", userRouter);
-app.use("/api/v1", productRouter);
-app.use("/api/v1", billRouter);
-app.use("/api/v1", customerRouter);
-app.use("/api/v1", transactionRouter);
+app.use("/api/v1/products", productRouter);
+app.use("/api/v1/bills", billRouter);
+app.use("/api/v1/customers", customerRouter);
+app.use("/api/v1/transactions", transactionRouter);
 app.use("/api/v1", stockRouter);
 app.use("/api/v1", categoryRouter);
 

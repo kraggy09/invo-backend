@@ -8,9 +8,9 @@ import {
 } from "../controllers/bill.controller";
 const billRouter = express.Router();
 
-billRouter.route("/createBill").post(createBill);
+billRouter.route("/create-bill").post(createBill);
 billRouter.route("/getBillDetails").get(getBillDetails);
-billRouter.route("/getAllBills").get(getAllBillsInDateRange);
+billRouter.route("/get-bills").get(getAllBillsInDateRange);
 billRouter.route("/getLatestBillId").get(getLatestBillId);
 billRouter.route("/getBillByProductName").get(getBillsByProductNameAndDate);
 

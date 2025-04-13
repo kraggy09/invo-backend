@@ -197,7 +197,11 @@ export const createBill = async (req: Request, res: Response) => {
         transaction,
       };
     });
-    await pubClient.publish(EVENTS_MAP.BILL_CREATED, JSON.stringify(result));
+    const data = {
+      ...result,
+      socketId: req.headers.socketId,
+    };
+    await pubClient.publish(EVENTS_MAP.BILL_CREATED, JSON.stringify(data));
     await pubClient.publish(
       EVENTS_MAP.BILL_CREATION_NOTIFICATION,
       JSON.stringify(result)
@@ -366,19 +370,17 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
         $gte: start,
         $lte: end,
       },
-    })
-      .skip(Number(offset)) // Skips the first 'offset' bills
-      .limit(Number(limit)) // Limits the number of bills to 'limit'
-      .populate("items.product");
+    }).populate("items.product");
 
     if (bills.length > 0) {
       return ApiResponse(res, 200, true, "Bills found", { bills });
     } else {
       return ApiResponse(
         res,
-        404,
-        false,
-        "No bills found for the given date range"
+        200,
+        true,
+        "No bills found for the given date range",
+        { bills: [] }
       );
     }
   } catch (error: any) {
