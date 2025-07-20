@@ -9,6 +9,7 @@ import customerRouter from "./routes/customer.route";
 import transactionRouter from "./routes/transaction.route";
 import stockRouter from "./routes/stock.route";
 import categoryRouter from "./routes/category.route";
+import { verifyToken } from "./services/token.service";
 
 const app: Express = express();
 
@@ -51,11 +52,11 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api/v1", userRouter);
 app.use("/api/v1/products", productRouter);
-app.use("/api/v1/bills", billRouter);
+app.use("/api/v1/bills", verifyToken, billRouter);
 app.use("/api/v1/customers", customerRouter);
 app.use("/api/v1/transactions", transactionRouter);
 app.use("/api/v1", stockRouter);
-app.use("/api/v1", categoryRouter);
+app.use("/api/v1/categories", categoryRouter);
 
 // Basic route
 app.get("/", (req: Request, res: Response) => {

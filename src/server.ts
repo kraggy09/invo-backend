@@ -1,12 +1,11 @@
 import app from "./app";
 import http from "http";
 import configureSocketIO from "./config/socket.config";
+import setupSocketHandlers from "./sockets";
 import connection from "./db/dbConfig";
 const PORT = process.env.PORT || 5000;
 const url = process.env.MONGODB_URI as string;
 
-// const abc = "";
-// abc = [];
 export const instanceId = crypto.randomUUID();
 const server = http.createServer(app);
 server.listen(PORT, async () => {
@@ -16,15 +15,10 @@ server.listen(PORT, async () => {
   try {
     await connection(url);
     const io = await configureSocketIO(server);
+    app.set("io", io);
     console.log("✅ Socket.IO configured successfully!");
 
-    io.on("connection", (socket) => {
-      console.log(`✅ New client connected: ${socket.id}`);
-
-      socket.on("disconnect", () => {
-        console.log(`❌ Client disconnected: ${socket.id}`);
-      });
-    });
+    setupSocketHandlers(io);
   } catch (error) {
     console.error("❌ Error configuring Socket.IO:", error);
   }

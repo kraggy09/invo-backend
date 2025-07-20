@@ -33,7 +33,8 @@ const transactionSchema = new Schema<ITransaction>({
     required: true,
   },
   approvedBy: {
-    type: Boolean,
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
     required: true,
   },
   name: {
@@ -63,7 +64,7 @@ const transactionSchema = new Schema<ITransaction>({
   },
   paymentMode: {
     type: String,
-    enum: ["cash", "online", "productReturn"],
+    enum: ["CASH", "ONINE", "PRODUCT_RETURN"],
     required: true,
   },
 });

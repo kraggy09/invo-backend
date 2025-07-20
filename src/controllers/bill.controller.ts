@@ -9,12 +9,11 @@ import Bill from "../models/bill.model";
 import Transaction from "../models/transaction.model";
 import moment from "moment-timezone";
 import { ApiError } from "../utils";
-import { pubClient } from "../config/redis.config";
 import { EVENTS_MAP } from "../constant/redisMap";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createBill = async (req: Request, res: Response) => {
-  const products = req.body.purchased;
+  const products = req.body.products;
   const {
     customerId,
     billId,
@@ -141,9 +140,10 @@ export const createBill = async (req: Request, res: Response) => {
         throw new ApiError(401, "Unable to create the bill");
       }
 
-      let transaction = null;
+      let transaction = null,
+        newTransId = null;
       if (payment > 0) {
-        let newTransId = await Counter.findOneAndUpdate(
+        newTransId = await Counter.findOneAndUpdate(
           { name: "transactionId" },
           {
             $inc: { value: 1 },
@@ -162,9 +162,10 @@ export const createBill = async (req: Request, res: Response) => {
               amount: payment,
               previousOutstanding: billTotal,
               newOutstanding: billTotal - payment,
-              taken: false,
               paymentMode,
               approved: true,
+              paymentIn: true,
+              approvedBy: createdBy,
               customer: customer._id,
             },
           ],
@@ -181,7 +182,7 @@ export const createBill = async (req: Request, res: Response) => {
         {
           outstanding: billTotal - payment,
         },
-        { session }
+        { session, new: true }
       );
 
       if (!updatedCustomer) {
@@ -195,21 +196,23 @@ export const createBill = async (req: Request, res: Response) => {
         bill: newBill[0],
         updatedCustomer,
         transaction,
+        billId: newBillId.value,
+        transactionId: newTransId?.value,
       };
     });
     const data = {
       ...result,
       socketId: req.headers.socketId,
     };
-    await pubClient.publish(EVENTS_MAP.BILL_CREATED, JSON.stringify(data));
-    await pubClient.publish(
-      EVENTS_MAP.BILL_CREATION_NOTIFICATION,
-      JSON.stringify(result)
-    );
+    const io = req.app.get("io");
+    io.emit(EVENTS_MAP.BILL_CREATED, data);
+    // io.emit(EVENTS_MAP.BILL_CREATION_NOTIFICATION, result);
     return ApiResponse(res, 201, true, "Bill created successfully", {
       bill: result,
     });
   } catch (error: any) {
+    console.log(error, "this is the error");
+
     if (error instanceof ApiError) {
       return ApiResponse(res, error.statusCode, false, error.message);
     }

@@ -53,7 +53,7 @@ export const createNewTransaction = async (req: Request, res: Response) => {
             purpose,
             approved: true,
             paymentIn: false,
-            paymentMode: "cash",
+            paymentMode: "CASH",
           },
         ],
         { session }

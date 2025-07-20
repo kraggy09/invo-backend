@@ -1,4 +1,4 @@
-import { Schema, Document } from "mongoose";
+import mongoose, { Schema, Document } from "mongoose";
 
 export interface ITransaction extends Document {
   id: number;
@@ -7,12 +7,12 @@ export interface ITransaction extends Document {
   newOutstanding?: number;
   customer?: Schema.Types.ObjectId;
   approved: boolean;
-  approvedBy: boolean;
+  approvedBy: Schema.Types.ObjectId;
   name: string;
   purpose?: string;
   amount: number;
   taken?: boolean;
   paymentIn: boolean;
   createdAt?: Date;
-  paymentMode: "cash" | "online" | "productReturn";
+  paymentMode: "CASH" | "ONLINE" | "PRODCT_RETURN";
 }
