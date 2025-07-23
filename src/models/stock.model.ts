@@ -21,10 +21,12 @@ const stockSchema = new Schema<IStock>({
     required: true,
     default: false,
   },
-  approvedBy: {
+  actionBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
-    required: true,
+  },
+  actionAt: {
+    type: Date,
   },
   product: {
     type: mongoose.Schema.Types.ObjectId,
@@ -40,7 +42,6 @@ const stockSchema = new Schema<IStock>({
   },
   stockAtUpdate: {
     type: Number,
-    required: true,
   },
   newStock: {
     type: Number,
@@ -50,6 +51,11 @@ const stockSchema = new Schema<IStock>({
     type: String,
     required: true,
     enum: ["PRODUCT_RETURN", "STOCK_UPDATE"],
+  },
+  rejected: {
+    type: Boolean,
+    default: false,
+    required: true,
   },
 });
 

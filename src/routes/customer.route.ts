@@ -9,6 +9,6 @@ const customerRouter = express.Router();
 
 customerRouter.route("/newCustomer").post(createNewCustomer);
 customerRouter.route("/get-customers").get(getAllCustomers);
-customerRouter.route("/getCustomer/:customerId").get(getSingleCustomer);
+customerRouter.route("/get-customer/:customerId").get(getSingleCustomer);
 
 export default customerRouter;

@@ -9,7 +9,7 @@ import {
 const billRouter = express.Router();
 
 billRouter.route("/create-bill").post(createBill);
-billRouter.route("/getBillDetails").get(getBillDetails);
+billRouter.route("/single-bill/:id").get(getBillDetails);
 billRouter.route("/get-bills").get(getAllBillsInDateRange);
 billRouter.route("/get-billing-id").get(getLatestBillId);
 billRouter.route("/getBillByProductName").get(getBillsByProductNameAndDate);

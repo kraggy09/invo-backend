@@ -1,4 +1,4 @@
-import mongoose from "mongoose";
+import mongoose, { ClientSession } from "mongoose";
 import Counter from "../models/counter.model";
 import ApiResponse from "../utils/ApiResponse";
 import { Request, Response } from "express";
@@ -24,93 +24,110 @@ export const createBill = async (req: Request, res: Response) => {
     createdBy,
   } = req.body;
 
-  const session = await mongoose.startSession();
+  const session: ClientSession = await mongoose.startSession();
 
   try {
     const result = await session.withTransaction(async () => {
-      const previousBillId = await Counter.findOne({ name: "billId" });
-      const previousTransactionId = await Counter.findOne({
-        name: "transactionId",
-      }).session(session);
+      // Fetch latest counters in parallel
+      const [previousBillId, previousTransactionId] = await Promise.all([
+        Counter.findOne({ name: "billId" }),
+        Counter.findOne({ name: "transactionId" }).session(session),
+      ]);
 
       if (!previousTransactionId || !previousBillId) {
-        throw new ApiError(404, "Previous transactionid or bill id not found");
+        throw new ApiError(404, "Previous transactionId or billId not found");
       }
 
-      if (previousTransactionId.value != transactionId) {
-        throw new ApiError(400, "Duplicate Transaction !! Pls refresh");
+      if (previousTransactionId.value !== transactionId) {
+        throw new ApiError(400, "Duplicate Transaction! Please refresh.");
       }
 
-      if (previousBillId.value != billId) {
-        throw new ApiError(400, "Duplicate bill !! Pls refresh");
+      if (previousBillId.value !== billId) {
+        throw new ApiError(400, "Duplicate Bill! Please refresh.");
       }
 
       const customer = await Customer.findById(customerId).session(session);
-      if (!customer) {
-        throw new ApiError(404, "Customer not found");
-      }
+      if (!customer) throw new ApiError(404, "Customer not found");
+
+      // Prepare product IDs and fetch all at once
+      const productIds = products.map(
+        (p: any) => new mongoose.Types.ObjectId(p.id)
+      );
+      const availableProducts = await Product.find(
+        { _id: { $in: productIds } },
+        { stock: 1, costPrice: 1 } // only needed fields
+      ).session(session);
+
+      const productMap = new Map<string, (typeof availableProducts)[0]>();
+      availableProducts.forEach((prod: any) => {
+        productMap.set(prod._id.toString(), prod);
+      });
 
       let billTotal = 0;
-      const items = [];
-      const productBulkOperations = [];
-      const loggerEntries = [];
+      const items: any[] = [];
+      const productBulkOps: any[] = [];
+      const loggerEntries: any[] = [];
 
-      for (const product of products) {
+      for (const productInput of products) {
         const quantity =
-          product.piece +
-          product.packet * product.packetQuantity +
-          product.box * product.boxQuantity;
-        billTotal += product.total;
+          productInput.piece +
+          productInput.packet * productInput.packetQuantity +
+          productInput.box * productInput.boxQuantity;
 
-        const id = new mongoose.Types.ObjectId(product.id);
+        const productIdStr = productInput.id.toString();
+        const product = productMap.get(productIdStr);
 
-        // Add product stock update operation to bulk array
-        productBulkOperations.push({
+        if (!product) {
+          throw new ApiError(
+            404,
+            `Product not found: ${productInput.name || productIdStr}`
+          );
+        }
+
+        billTotal += productInput.total;
+
+        // Update stock
+        productBulkOps.push({
           updateOne: {
-            filter: { _id: id },
+            filter: { _id: product._id },
             update: { $inc: { stock: -quantity } },
           },
         });
 
-        // Add logger entry
-        const availableProduct = await Product.findById(id).session(session);
-        if (!availableProduct) {
-          throw new Error(`Product not found: ${product.name || product.id}`);
-        }
-
+        // Push to items and logger arrays
         loggerEntries.push({
           name: "Billing",
-          previousQuantity: availableProduct.stock,
-          quantity: quantity,
-          newQuantity: availableProduct.stock - quantity,
-          product: availableProduct._id,
+          previousQuantity: product.stock,
+          quantity,
+          newQuantity: product.stock - quantity,
+          product: product._id,
         });
 
         items.push({
-          costPrice: availableProduct.costPrice,
-          previousQuantity: availableProduct.stock,
-          newQuantity: availableProduct.stock - quantity,
-          product: availableProduct._id,
-          quantity: quantity,
-          discount: product.discount || 0,
-          type: product.type,
-          total: product.total,
+          costPrice: product.costPrice,
+          previousQuantity: product.stock,
+          newQuantity: product.stock - quantity,
+          productSnapshot: productInput,
+          product: product._id,
+          quantity,
+          discount: productInput.discount || 0,
+          type: productInput.type,
+          total: productInput.total,
         });
       }
 
-      // Execute the bulk write operation for stock updates
-      const bulkWriteResult = await Product.bulkWrite(productBulkOperations, {
-        session,
-      });
-
-      if (bulkWriteResult.modifiedCount !== products.length) {
-        throw new ApiError(401, "Failed to update all product stocks");
+      // Execute stock update
+      const bulkResult = await Product.bulkWrite(productBulkOps, { session });
+      if (bulkResult.modifiedCount !== products.length) {
+        throw new ApiError(500, "Product stock update mismatch");
       }
 
+      // Logger
       await Logger.insertMany(loggerEntries, { session });
 
-      billTotal = Math.ceil(billTotal + customer.outstanding - discount);
+      const netTotal = Math.ceil(billTotal + customer.outstanding - discount);
 
+      // Increment Bill ID counter
       const newBillId = await Counter.findOneAndUpdate(
         { name: "billId" },
         { $inc: { value: 1 } },
@@ -118,15 +135,16 @@ export const createBill = async (req: Request, res: Response) => {
       );
 
       if (!newBillId) {
-        throw new ApiError(403, "Error while creating bill id");
+        throw new ApiError(500, "Error while generating new Bill ID");
       }
 
-      const newBill = await Bill.create(
+      // Create the bill
+      const [newBill] = await Bill.create(
         [
           {
             customer: customerId,
-            items: items,
-            total: billTotal,
+            items,
+            total: netTotal,
             payment,
             discount,
             createdBy,
@@ -136,32 +154,32 @@ export const createBill = async (req: Request, res: Response) => {
         { session }
       );
 
-      if (!newBill[0]) {
-        throw new ApiError(401, "Unable to create the bill");
-      }
+      if (!newBill) throw new ApiError(500, "Failed to create new bill");
 
-      let transaction = null,
-        newTransId = null;
+      // Process payment transaction if applicable
+      let transaction = null;
+      let newTransactionCounter = null;
+
       if (payment > 0) {
-        newTransId = await Counter.findOneAndUpdate(
+        newTransactionCounter = await Counter.findOneAndUpdate(
           { name: "transactionId" },
-          {
-            $inc: { value: 1 },
-          },
+          { $inc: { value: 1 } },
           { new: true, session }
         );
-        if (!newTransId) {
-          throw new ApiError(401, "Unbale to find the transaction id");
+
+        if (!newTransactionCounter) {
+          throw new ApiError(500, "Unable to get new transaction ID");
         }
-        transaction = await Transaction.create(
+
+        const [createdTransaction] = await Transaction.create(
           [
             {
-              id: newTransId.value,
+              id: newTransactionCounter.value,
               name: customer.name,
               purpose: "Payment",
               amount: payment,
-              previousOutstanding: billTotal,
-              newOutstanding: billTotal - payment,
+              previousOutstanding: netTotal,
+              newOutstanding: netTotal - payment,
               paymentMode,
               approved: true,
               paymentIn: true,
@@ -172,51 +190,50 @@ export const createBill = async (req: Request, res: Response) => {
           { session }
         );
 
-        if (!transaction[0]) {
-          throw new ApiError(400, "Unable to create the transaction");
+        if (!createdTransaction) {
+          throw new ApiError(400, "Transaction creation failed");
         }
+
+        transaction = createdTransaction;
       }
 
       const updatedCustomer = await Customer.findByIdAndUpdate(
         customerId,
-        {
-          outstanding: billTotal - payment,
-        },
-        { session, new: true }
+        { outstanding: netTotal - payment },
+        { new: true, session }
       );
 
       if (!updatedCustomer) {
-        throw new ApiError(
-          400,
-          "Unable to update the customer's outstanding balance"
-        );
+        throw new ApiError(400, "Failed to update customer's outstanding");
       }
 
       return {
-        bill: newBill[0],
+        bill: newBill,
         updatedCustomer,
         transaction,
         billId: newBillId.value,
-        transactionId: newTransId?.value,
+        transactionId: newTransactionCounter?.value,
       };
     });
+
+    // Notify with socket.io
     const data = {
       ...result,
-      socketId: req.headers.socketId,
+      socketId: req.headers.socketid,
     };
+
     const io = req.app.get("io");
     io.emit(EVENTS_MAP.BILL_CREATED, data);
-    // io.emit(EVENTS_MAP.BILL_CREATION_NOTIFICATION, result);
+
     return ApiResponse(res, 201, true, "Bill created successfully", {
       bill: result,
     });
   } catch (error: any) {
-    console.log(error, "this is the error");
-
+    console.error("❌ Bill creation error:", error);
     if (error instanceof ApiError) {
       return ApiResponse(res, error.statusCode, false, error.message);
     }
-    return ApiResponse(res, 500, false, error.message || "Server error");
+    return ApiResponse(res, 500, false, error.message || "Server Error");
   } finally {
     session.endSession();
   }
@@ -225,6 +242,10 @@ export const createBill = async (req: Request, res: Response) => {
 export const getBillDetails = async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
+    console.log(req.params, "This is the params of the bill");
+
+    console.log(id, "This is the id of the bill");
+
     const bill = await Bill.findById(id)
       .populate("items.product")
       .populate("customer");

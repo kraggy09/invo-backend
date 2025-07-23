@@ -9,11 +9,11 @@ import {
 } from "../controllers/product.controller";
 const productRouter = express.Router();
 
-productRouter.route("/products/newItem").post(createNewProduct);
+productRouter.route("/products/new-item").post(createNewProduct);
 productRouter.route("/product").get(getProduct);
 productRouter.route("/all-products").get(getAllproduct);
 productRouter.route("/products/delete").delete(deleteProduct);
-productRouter.route("/products/updateProduct").post(updateProductDetails);
+productRouter.route("/products/update-product").post(updateProductDetails);
 productRouter.route("/products/return").post(returnProduct);
 
 export default productRouter;

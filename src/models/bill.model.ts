@@ -60,6 +60,10 @@ const billSchema = new Schema<IBill>(
           type: Number,
           required: true,
         },
+        productSnapshot: {
+          type: Object,
+          reuired: true,
+        },
       },
     ],
     total: {
