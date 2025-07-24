@@ -13,4 +13,6 @@ export interface IStock extends Document {
   rejected: boolean;
   purpose: "STOCK_UPDATE" | "PRODUCT_RETURN";
   actionAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
 }

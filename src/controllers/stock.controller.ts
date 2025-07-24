@@ -72,6 +72,7 @@ export const getInventoryRequestForDate = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {};
+
 export const updateInventoryRequest = async (
   req: AuthenticatedRequest,
   res: Response
@@ -96,7 +97,7 @@ export const updateInventoryRequest = async (
     const result = await session.withTransaction(async () => {
       // Bulk fetch all products in ONE query (minimizes DB calls)
       const existingProducts = await Product.find({ _id: { $in: uniqueIds } })
-        .select("_id stock") // Only fetch needed fields
+        .select("_id stock name") // Added 'name' to fetch product names for error messages
         .lean() // Faster: plain JS objects
         .session(session)
         .exec();
@@ -112,6 +113,35 @@ export const updateInventoryRequest = async (
         throw new ApiError(404, `Products not found: ${missingIds.join(", ")}`);
       }
 
+      // Check for existing unapproved stock updates for these products
+      const pendingStocks = await Stock.find({
+        product: { $in: uniqueIds },
+        approved: false,
+      })
+        .select("product")
+        .lean()
+        .session(session)
+        .exec();
+
+      // Create a set of product IDs with pending updates
+      const pendingProductIds = new Set(
+        pendingStocks.map((s) => s.product.toString())
+      );
+
+      // Find products in the request that already have pending updates
+      const pendingProducts = products
+        .filter((p) => pendingProductIds.has(p.id))
+        .map((p) => productMap.get(p.id)!.name); // Use non-null assertion since we validated existence
+
+      if (pendingProducts.length > 0) {
+        throw new ApiError(
+          400,
+          `Stock updates already exist for the following products: ${pendingProducts.join(
+            ", "
+          )}`
+        );
+      }
+
       // Prepare bulk insert data
       const updateProductsData = products.map((productData) => {
         const existingProduct = productMap.get(productData.id);
@@ -123,7 +153,7 @@ export const updateInventoryRequest = async (
           product: existingProduct!._id,
           oldStock: existingProduct!.stock, // Pull from DB (fixed from original code)
           quantity: productData.quantity,
-          newStock: existingProduct!.stock + productData.quantity, // Calculate new stock,
+          newStock: existingProduct!.stock + productData.quantity, // Calculate new stock
           purpose: "STOCK_UPDATE",
         };
       });
@@ -133,8 +163,29 @@ export const updateInventoryRequest = async (
         session,
       });
 
-      return createdItems;
+      if (createdItems.length === 0) {
+        throw new ApiError(500, "Failed to create stock update requests");
+      }
+      const populatedCreatedItems = await Stock.find({
+        _id: { $in: createdItems.map((item) => item._id) },
+      })
+        .populate([
+          { path: "product", select: "name stock" },
+          { path: "createdBy", select: "name username" },
+        ])
+        .session(session)
+        .lean()
+        .exec();
+
+      return populatedCreatedItems;
     });
+
+    const io = req.app.get("io");
+    if (io) {
+      console.log("Emitting INVENTORY_UPDATE_REQUEST event");
+      io.emit("INVENTORY_UPDATE_REQUEST", result);
+    }
+    console.log("Inventory update request created:", result);
 
     // Success response
     return ApiResponse(res, 201, true, "Sent for verification to admin", {
@@ -155,7 +206,7 @@ export const getInventoryUpdateRequest = async (
   res: Response
 ) => {
   try {
-    const inventory = await Stock.find({ approved: false })
+    const inventory = await Stock.find({ approved: false, rejected: false })
       .populate("product")
       .populate("createdBy")
       .sort({ createdAt: -1 });
@@ -184,7 +235,8 @@ export const rejectInventoryRequest = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
-  const { stockId } = req.body;
+  console.log(req.params.id);
+  const { id } = req.params;
   const userId = req.user?.id || req.user?._id; // Assuming user ID is available in req.user
   const session = await mongoose.startSession();
 
@@ -192,7 +244,7 @@ export const rejectInventoryRequest = async (
     const result = await session.withTransaction(async () => {
       const product = await Stock.findOneAndUpdate(
         {
-          _id: stockId,
+          _id: id,
         },
         {
           $set: {
@@ -213,6 +265,16 @@ export const rejectInventoryRequest = async (
 
       return product;
     });
+
+    const io = req.app.get("io");
+    const startTime = new Date();
+    startTime.setHours(0, 0, 0, 0); // Set to start of the day
+    const endTime = new Date();
+    endTime.setHours(23, 59, 59, 999); // Set to end of the day
+    const createdAt = result.createdAt;
+    if (createdAt >= startTime && createdAt <= endTime) {
+      io.emit("INVENTORY_REJECTED", result._id);
+    }
 
     return ApiResponse(res, 200, true, "Request rejected successfully", result);
   } catch (error: any) {
@@ -291,7 +353,7 @@ export const acceptAllInventoryRequest = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
-  const { inventoryRequests } = req.body; // Expecting { inventoryRequests: string[] } (array of Stock _ids)
+  const { inventoryRequests } = req.body; // expecting { inventoryRequests: string[] }
   const userId = req.user?.id;
   const session = await mongoose.startSession();
 
@@ -315,8 +377,8 @@ export const acceptAllInventoryRequest = async (
         _id: { $in: requestIds },
         approved: false,
         rejected: false,
-      }) // Only unapproved
-        .select("_id product quantity") // Only needed fields
+      })
+        .select("_id product quantity createdAt") // make sure to include createdAt
         .lean()
         .session(session)
         .exec();
@@ -344,68 +406,103 @@ export const acceptAllInventoryRequest = async (
         .exec();
 
       // Create maps for O(1) lookups
-      const stockMap = new Map(stockRequests.map((s) => [s._id.toString(), s]));
       const productMap = new Map(products.map((p) => [p._id.toString(), p]));
 
-      // Prepare bulk operations
+      // Group updates by product to handle aggregation (fix for multiple requests per product)
+      const productUpdates = new Map<
+        string,
+        { totalQty: number; product: any; requests: any[] }
+      >();
+      for (const s of stockRequests) {
+        const pid = s.product.toString();
+        const product = productMap.get(pid);
+        if (!product) {
+          throw new ApiError(404, `Product not found: ${pid}`);
+        }
+        if (!productUpdates.has(pid)) {
+          productUpdates.set(pid, { totalQty: 0, product, requests: [] });
+        }
+        productUpdates.get(pid)!.totalQty += s.quantity;
+        productUpdates.get(pid)!.requests.push(s);
+      }
+
+      // Prepare bulk operations arrays
       const productBulkOps = [];
       const loggerEntries = [];
       const stockBulkOps = [];
 
-      for (const id of requestIds) {
-        const stockUpdateRequest = stockMap.get(id);
-        if (!stockUpdateRequest) {
-          return ApiResponse(
-            res,
-            400,
-            false,
-            "Invalid stock request ID: " + id
-          );
-        }
-        const productId = stockUpdateRequest.product.toString();
-        const availableProduct = productMap.get(productId);
+      // Collect updated products details for emission
+      const updatedProducts = [];
 
-        if (!availableProduct) {
-          throw new ApiError(404, `Product not found: ${productId}`);
-        }
+      // Prepare today's date range boundaries
+      const currentDateStartTime = new Date();
+      currentDateStartTime.setHours(0, 0, 0, 0); // today 00:00:00.000
 
-        const newStock = availableProduct.stock + stockUpdateRequest.quantity;
+      const currentDateLastTime = new Date();
+      currentDateLastTime.setHours(23, 59, 59, 999); // today 23:59:59.999
 
-        // Product stock update
+      // Array to hold stock requests created today
+      const todayStockUpdates: any[] = [];
+
+      for (const [pid, { totalQty, product, requests }] of productUpdates) {
+        const previousStock = product.stock;
+        const newStock = previousStock + totalQty;
+
+        // Product stock update ($inc for safety)
         productBulkOps.push({
           updateOne: {
-            filter: { _id: availableProduct._id },
-            update: { $inc: { stock: stockUpdateRequest.quantity } },
+            filter: { _id: product._id },
+            update: { $inc: { stock: totalQty } },
           },
         });
 
-        // Logger entry
+        // Logger entry (aggregated update per product)
         loggerEntries.push({
           name: "STOCK_UPDATE",
-          previousQuantity: availableProduct.stock,
+          previousQuantity: previousStock,
           newQuantity: newStock,
-          quantity: stockUpdateRequest.quantity,
-          product: availableProduct._id,
+          quantity: totalQty,
+          product: product._id,
         });
 
-        // Stock request update
-        stockBulkOps.push({
-          updateOne: {
-            filter: { _id: stockUpdateRequest._id },
-            update: {
-              $set: {
-                stockAtUpdate: availableProduct.stock,
-                newStock,
-                approved: true,
-                actionBy: userId,
-                actionAt: new Date(), // Add if needed (per schema)
+        // Update all stock requests for this product
+        for (const s of requests) {
+          // Check if createdAt is today, push into todayStockUpdates if yes
+          const createdAtTime = s.createdAt;
+          if (
+            createdAtTime >= currentDateStartTime &&
+            createdAtTime <= currentDateLastTime
+          ) {
+            todayStockUpdates.push({ ...s, previousStock, newStock, totalQty });
+          }
+
+          // Push bulk update operation for stock request
+          stockBulkOps.push({
+            updateOne: {
+              filter: { _id: s._id },
+              update: {
+                $set: {
+                  stockAtUpdate: previousStock,
+                  newStock,
+                  approved: true,
+                  actionBy: userId,
+                  actionAt: new Date(),
+                },
               },
             },
-          },
+          });
+        }
+
+        // Collect updated product info for emission
+        updatedProducts.push({
+          productId: pid,
+          previousStock,
+          newStock,
+          quantityAdded: totalQty,
         });
       }
 
-      // Execute bulk updates
+      // Execute bulk operations within the transaction/session
       if (productBulkOps.length > 0) {
         await Product.bulkWrite(productBulkOps, { session });
       }
@@ -416,11 +513,22 @@ export const acceptAllInventoryRequest = async (
         await Stock.bulkWrite(stockBulkOps, { session });
       }
 
-      return { updatedCount: requestIds.length };
+      return {
+        updatedCount: requestIds.length,
+        updatedProducts,
+        todayStockUpdates,
+      };
     });
+
+    // Emit event to socket.io if available
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("INVENTORY_UPDATED", { action: "acceptAll", data: result });
+    }
 
     return ApiResponse(res, 200, true, `All stock updates successful`);
   } catch (error: any) {
+    console.error(error);
     if (session.inTransaction()) await session.abortTransaction();
     return getServerErrorLog(res, error);
   } finally {

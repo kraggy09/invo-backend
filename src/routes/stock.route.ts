@@ -22,8 +22,8 @@ stockRouter.route("/products/get-all-requests").get(getAllRequests);
 
 stockRouter.route("/products/get-requests").get(getInventoryUpdateRequest);
 stockRouter
-  .route("/products/reject-stock-request")
-  .post(rejectInventoryRequest);
+  .route("/products/reject-stock-request/:id")
+  .get(rejectInventoryRequest);
 
 stockRouter
   .route("/products/accept-stock-requests")
