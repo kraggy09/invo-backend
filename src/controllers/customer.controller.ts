@@ -3,6 +3,8 @@ import { Request, Response } from "express";
 import ApiResponse from "../utils/ApiResponse";
 import Bill from "../models/bill.model";
 import Transaction from "../models/transaction.model";
+import { EVENTS_MAP } from "../constant/redisMap";
+import mongoose from "mongoose";
 
 export const createNewCustomer = async (req: Request, res: Response) => {
   try {
@@ -21,11 +23,16 @@ export const createNewCustomer = async (req: Request, res: Response) => {
       return ApiResponse(res, 404, false, "Customer already exists");
     }
 
-    const newCustomer = Customer.create({
+    const newCustomer = await Customer.create({
       name,
       outstanding,
       phone,
     });
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit(EVENTS_MAP.CUSTOMER_CREATED, newCustomer);
+    }
 
     return ApiResponse(res, 201, true, "Customer created successfully", {
       customer: newCustomer,
@@ -50,7 +57,7 @@ export const getAllCustomers = async (req: Request, res: Response) => {
 };
 
 export const getSingleCustomer = async (req: Request, res: Response) => {
-  const customerId = req.params.customerId; // Access the customer ID from the route parameter
+  const customerId = req.params.id; // Access the customer ID from the route parameter
 
   try {
     const customer = await Customer.findById(customerId);
@@ -59,14 +66,14 @@ export const getSingleCustomer = async (req: Request, res: Response) => {
     }
 
     let bills = await Bill.find({ customer: customerId }).sort({
-      createdAt: 1,
+      createdAt: -1,
     });
 
     let transactions = await Transaction.find({
       customer: customerId,
       approved: true,
     }).sort({
-      createdAt: 1,
+      createdAt: -1,
     });
 
     const newCustomer = { ...customer.toObject(), bills, transactions };
@@ -76,6 +83,138 @@ export const getSingleCustomer = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error("Error fetching customer:", error);
+    return ApiResponse(res, 500, false, "Internal Server Error", error.message);
+  }
+};
+
+export const getCustomerAnalytics = async (req: Request, res: Response) => {
+  try {
+    const customerId = req.params.id;
+    let days = parseInt(req.query.days as string) || 7;
+
+    // Validate days ranges
+    if (![7, 15, 30, 45].includes(days)) {
+      days = 7;
+    }
+
+    const endDate = new Date();
+    endDate.setHours(23, 59, 59, 999);
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days + 1);
+    startDate.setHours(0, 0, 0, 0);
+
+    // 1. Fetch Bills for Sales & Profit
+    const billsAgg = await Bill.aggregate([
+      {
+        $match: {
+          customer: new mongoose.Types.ObjectId(customerId),
+          createdAt: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $unwind: "$items"
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$createdAt" }
+          },
+          dailySales: { $sum: "$items.total" },
+          dailyCost: {
+            $sum: {
+              $multiply: [
+                { $ifNull: ["$items.productSnapshot.costPrice", "$items.costPrice"] },
+                "$items.quantity"
+              ]
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          date: "$_id",
+          sales: "$dailySales",
+          profit: { $subtract: ["$dailySales", "$dailyCost"] },
+          _id: 0
+        }
+      },
+      { $sort: { date: 1 } }
+    ]);
+
+    // 2. Fetch Transactions for Payments
+    const txAgg = await Transaction.aggregate([
+      {
+        $match: {
+          customer: new mongoose.Types.ObjectId(customerId),
+          createdAt: { $gte: startDate, $lte: endDate },
+          approved: true,      // Confirmed only
+          $or: [
+            { paymentIn: true },
+            { paymentIn: { $exists: false }, taken: false } // Legacy support
+          ]
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$createdAt" }
+          },
+          dailyPayments: { $sum: "$amount" }
+        }
+      },
+      {
+        $project: {
+          date: "$_id",
+          payment: "$dailyPayments",
+          _id: 0
+        }
+      },
+      { $sort: { date: 1 } }
+    ]);
+
+    // 3. Merge data into a continuous timeline array
+    const chartData = [];
+    let totalSales = 0;
+    let totalProfit = 0;
+    let totalPayments = 0;
+
+    // Fill the array with the requested days chronologically
+    for (let i = 0; i < days; i++) {
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + i);
+      const dateStr = d.toISOString().split("T")[0];
+
+      const billMatch = billsAgg.find(b => b.date === dateStr);
+      const txMatch = txAgg.find(t => t.date === dateStr);
+
+      const daySales = billMatch ? billMatch.sales : 0;
+      const dayProfit = billMatch ? billMatch.profit : 0;
+      const dayPayment = txMatch ? txMatch.payment : 0;
+
+      totalSales += daySales;
+      totalProfit += dayProfit;
+      totalPayments += dayPayment;
+
+      chartData.push({
+        date: dateStr,
+        sales: daySales,
+        profit: dayProfit,
+        payment: dayPayment
+      });
+    }
+
+    return ApiResponse(res, 200, true, "Customer analytics retrieved successfully", {
+      chartData,
+      summary: {
+        totalSales,
+        totalProfit,
+        totalPayments
+      }
+    });
+
+  } catch (error: any) {
+    console.error("Error fetching customer analytics:", error);
     return ApiResponse(res, 500, false, "Internal Server Error", error.message);
   }
 };

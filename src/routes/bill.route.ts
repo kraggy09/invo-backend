@@ -8,10 +8,9 @@ import {
 } from "../controllers/bill.controller";
 const billRouter = express.Router();
 
-billRouter.route("/create-bill").post(createBill);
-billRouter.route("/single-bill/:id").get(getBillDetails);
-billRouter.route("/get-bills").get(getAllBillsInDateRange);
-billRouter.route("/get-billing-id").get(getLatestBillId);
-billRouter.route("/getBillByProductName").get(getBillsByProductNameAndDate);
+billRouter.route("/").post(createBill).get(getAllBillsInDateRange);
+billRouter.route("/latest-id").get(getLatestBillId);
+billRouter.route("/search-by-product").get(getBillsByProductNameAndDate);
+billRouter.route("/:id").get(getBillDetails);
 
 export default billRouter;

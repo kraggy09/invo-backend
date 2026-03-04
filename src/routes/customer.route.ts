@@ -3,12 +3,13 @@ import {
   createNewCustomer,
   getAllCustomers,
   getSingleCustomer,
+  getCustomerAnalytics,
 } from "../controllers/customer.controller";
 
 const customerRouter = express.Router();
 
-customerRouter.route("/newCustomer").post(createNewCustomer);
-customerRouter.route("/get-customers").get(getAllCustomers);
-customerRouter.route("/get-customer/:customerId").get(getSingleCustomer);
+customerRouter.route("/").post(createNewCustomer).get(getAllCustomers);
+customerRouter.route("/:id").get(getSingleCustomer);
+customerRouter.route("/:id/analytics").get(getCustomerAnalytics);
 
 export default customerRouter;

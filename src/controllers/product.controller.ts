@@ -17,6 +17,7 @@ import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { IStock } from "../types/stock.type";
 import Stock from "../models/stock.model";
 import moment from "moment-timezone";
+import { EVENTS_MAP } from "../constant/redisMap";
 
 const IST = "Asia/Kolkata"; // Update with the correct path
 
@@ -134,6 +135,11 @@ export const createNewProduct = async (req: Request, res: Response) => {
       category,
     });
 
+    const io = req.app.get("io");
+    if (io) {
+      io.emit(EVENTS_MAP.PRODUCT_CREATED, newProduct);
+    }
+
     // Return response
     return ApiResponse(res, 201, true, `Product created successfully`, {
       product: newProduct,
@@ -148,6 +154,16 @@ export const createNewProduct = async (req: Request, res: Response) => {
 export const getProduct = async (req: Request, res: Response) => {
   try {
     const { name, barcode } = req.query;
+    const { id } = req.params;
+
+    if (id) {
+      const product = await Product.findById(id);
+      if (product) {
+        return ApiResponse(res, 200, true, "The product is found", {
+          product: [product],
+        });
+      }
+    }
 
     if (name) {
       const product = await Product.find({ name });
@@ -188,6 +204,7 @@ export const getAllproduct = async (req: Request, res: Response) => {
 export const updateProductDetails = async (req: Request, res: Response) => {
   try {
     const product = req.body;
+    const { id } = req.params;
     const {
       productId,
       barcode,
@@ -242,13 +259,18 @@ export const updateProductDetails = async (req: Request, res: Response) => {
     }
 
     const updatedProduct = await Product.findByIdAndUpdate(
-      productId,
+      id || productId,
       { $set: updatedData },
       { new: true }
     );
 
     if (!updatedProduct) {
       return ApiResponse(res, 404, false, "Product not found");
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit(EVENTS_MAP.PRODUCT_UPDATED, updatedProduct);
     }
 
     return ApiResponse(res, 200, true, "Product Updated Successfully", {
@@ -265,10 +287,14 @@ export const deleteProduct = async (req: Request, res: Response) => {
   try {
     const productId = req.params;
     if (productId) {
-      const deletedProduct = await Product.findByIdAndDelete({
-        productId,
-      });
+      const deletedProduct = await Product.findByIdAndDelete(
+        productId.id || Object.values(productId)[0]
+      );
       if (deletedProduct) {
+        const io = req.app.get("io");
+        if (io) {
+          io.emit(EVENTS_MAP.PRODUCT_DELETED, deletedProduct._id);
+        }
         return ApiResponse(res, 201, true, "Product deleted successfully");
       }
     }
@@ -500,6 +526,17 @@ export const returnProduct = async (
 
       if (!newBillId) {
         throw new ApiError(500, "Unable to create the bill id");
+      }
+
+      // Important: emit product stock updates
+      const io = req.app.get("io");
+      if (io) {
+        items.forEach((item) => {
+          io.emit(EVENTS_MAP.PRODUCT_UPDATED, {
+            _id: item.product,
+            stock: item.previousQuantity + item.quantity,
+          });
+        });
       }
 
       // Success response

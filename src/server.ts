@@ -4,7 +4,7 @@ import configureSocketIO from "./config/socket.config";
 import setupSocketHandlers from "./sockets";
 import connection from "./db/dbConfig";
 const PORT = process.env.PORT || 5000;
-const url = process.env.MONGODB_URI as string;
+const url = process.env.MONGO_URI as string;
 
 const server = http.createServer(app);
 server.listen(PORT, async () => {

@@ -248,7 +248,8 @@ export const getBillDetails = async (req: Request, res: Response) => {
 
     const bill = await Bill.findById(id)
       .populate("items.product")
-      .populate("customer");
+      .populate("customer")
+      .populate("createdBy", "name username");
 
     if (!bill) {
       return ApiResponse(res, 404, false, "Failed to get the data of the bill");
@@ -394,7 +395,10 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
         $gte: start,
         $lte: end,
       },
-    }).populate("items.product");
+    })
+      .populate("items.product")
+      .populate("customer")
+      .populate("createdBy", "name username");
 
     if (bills.length > 0) {
       return ApiResponse(res, 200, true, "Bills found", { bills });
@@ -408,6 +412,8 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
       );
     }
   } catch (error: any) {
+    console.log(error, "This is the error you need to check");
+
     return ApiResponse(res, 500, false, "Server error", error.message);
   }
 };

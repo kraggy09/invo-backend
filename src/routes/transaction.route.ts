@@ -7,15 +7,16 @@ import {
   getLatestTransactionId,
   rejectTransaction,
   getAllTransactionsInDateRange,
+  getSingleTransaction
 } from "../controllers/transaction.controller";
 const transactionRouter = express.Router();
 
-transactionRouter.route("/createTransation").post(createNewTransaction);
-transactionRouter.route("/createPayment").post(createNewPayment);
-transactionRouter.route("/getTransactionForApproval").get(getAllTransactions);
-transactionRouter.route("/approveTransaction").post(approveTransaction);
-transactionRouter.route("/rejectTransaction").post(rejectTransaction);
-transactionRouter.route("/get-transaction-id").get(getLatestTransactionId);
-transactionRouter.route("/get-transactions").get(getAllTransactionsInDateRange);
+transactionRouter.route("/").post(createNewTransaction).get(getAllTransactionsInDateRange);
+transactionRouter.route("/payments").post(createNewPayment);
+transactionRouter.route("/approvals").get(getAllTransactions);
+transactionRouter.route("/:id/approve").post(approveTransaction);
+transactionRouter.route("/:id/reject").post(rejectTransaction);
+transactionRouter.route("/latest-id").get(getLatestTransactionId);
+transactionRouter.route("/:id").get(getSingleTransaction);
 
 export default transactionRouter;

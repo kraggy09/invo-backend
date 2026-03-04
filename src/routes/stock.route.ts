@@ -9,24 +9,9 @@ import {
 
 const stockRouter = express.Router();
 
-stockRouter
-  .route("/products/raise-stock-requests")
-  .post(updateInventoryRequest);
-
-// Depreceated all the stock updates are handled in the all endpoints
-// stockRouter
-//   .route("/products/accept-stock-requests")
-//   .post(acceptInventoryRequest);
-
-stockRouter.route("/products/get-all-requests").get(getAllRequests);
-
-stockRouter.route("/products/get-requests").get(getInventoryUpdateRequest);
-stockRouter
-  .route("/products/reject-stock-request/:id")
-  .get(rejectInventoryRequest);
-
-stockRouter
-  .route("/products/accept-stock-requests")
-  .post(acceptAllInventoryRequest);
+stockRouter.route("/requests").get(getInventoryUpdateRequest).post(updateInventoryRequest);
+stockRouter.route("/requests/accept-all").post(acceptAllInventoryRequest);
+stockRouter.route("/requests/all").get(getAllRequests);
+stockRouter.route("/requests/:id/reject").get(rejectInventoryRequest);
 
 export default stockRouter;

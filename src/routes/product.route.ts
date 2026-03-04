@@ -9,11 +9,8 @@ import {
 } from "../controllers/product.controller";
 const productRouter = express.Router();
 
-productRouter.route("/products/new-item").post(createNewProduct);
-productRouter.route("/product").get(getProduct);
-productRouter.route("/all-products").get(getAllproduct);
-productRouter.route("/products/delete").delete(deleteProduct);
-productRouter.route("/products/update-product").post(updateProductDetails);
-productRouter.route("/products/return").post(returnProduct);
+productRouter.route("/").post(createNewProduct).get(getAllproduct);
+productRouter.route("/return").post(returnProduct);
+productRouter.route("/:id").get(getProduct).delete(deleteProduct).put(updateProductDetails);
 
 export default productRouter;

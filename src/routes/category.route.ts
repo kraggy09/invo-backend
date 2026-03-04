@@ -6,7 +6,6 @@ import {
 
 const categoryRouter = express.Router();
 
-categoryRouter.route("/newCategory").post(createNewCategory);
-categoryRouter.route("/all-categories").get(getAllCategories);
+categoryRouter.route("/").post(createNewCategory).get(getAllCategories);
 
 export default categoryRouter;

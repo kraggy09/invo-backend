@@ -6,6 +6,7 @@ import Transaction from "../models/transaction.model";
 import { ApiError, getAclOfAUser } from "../utils";
 import Customer from "../models/customer.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import { EVENTS_MAP } from "../constant/redisMap";
 
 export const createNewTransaction = async (req: Request, res: Response) => {
   const { name, amount, purpose, transactionId } = req.body;
@@ -67,6 +68,11 @@ export const createNewTransaction = async (req: Request, res: Response) => {
         newTransaction: newTransaction[0],
       };
     });
+
+    const io = req.app.get("io");
+    if (io && result && (result as any).newTransaction) {
+      io.emit(EVENTS_MAP.TRANSACTION_CREATED, (result as any).newTransaction);
+    }
 
     session.endSession();
 
@@ -159,6 +165,14 @@ export const createNewPayment = async (req: Request, res: Response) => {
       };
     });
 
+    const io = req.app.get("io");
+    if (io && result && (result as any).newTransaction) {
+      const transactionToEmit = (result as any).newTransaction;
+      io.emit(EVENTS_MAP.TRANSACTION_CREATED, transactionToEmit);
+      const customer = await Customer.findById(transactionToEmit.customer);
+      if (customer) io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
+    }
+
     session.endSession();
 
     return ApiResponse(res, 201, true, "Payment recieved sucessfully", {
@@ -226,6 +240,12 @@ export const approveTransaction = async (
       transaction.approved = true;
       await transaction.save({ session });
     });
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit(EVENTS_MAP.TRANSACTION_UPDATED, transaction);
+      io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
+    }
 
     // Success response
 
@@ -330,12 +350,24 @@ export const getAllTransactionsInDateRange = async (
     );
   }
   try {
+    const start = new Date(startDate as string);
+    const end = new Date(endDate as string);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return ApiResponse(res, 400, false, "Invalid date format");
+    }
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
     const transactions = await Transaction.find({
       createdAt: {
-        $gte: startDate,
-        $lte: endDate,
+        $gte: start,
+        $lte: end,
       },
-    });
+    })
+      .populate("customer", "name phone")
+      .populate("approvedBy", "name username");
 
     if (transactions.length === 0) {
       return ApiResponse(
@@ -350,6 +382,21 @@ export const getAllTransactionsInDateRange = async (
     return ApiResponse(res, 200, true, "Transactions found successfully", {
       transactions,
     });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message || "Server Error");
+  }
+};
+
+export const getSingleTransaction = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const transaction = await Transaction.findById(id)
+      .populate("approvedBy", "name username")
+      .populate("customer", "name phone");
+    if (!transaction) {
+      return ApiResponse(res, 404, false, "Transaction not found");
+    }
+    return ApiResponse(res, 200, true, "Transaction found", { transaction });
   } catch (error: any) {
     return ApiResponse(res, 500, false, error.message || "Server Error");
   }
