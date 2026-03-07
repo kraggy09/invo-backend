@@ -12,6 +12,8 @@ export interface ITransaction extends Document {
   purpose?: string;
   amount: number;
   taken?: boolean;
+  approvedAt?: Date;
+  rejectedAt?: Date;
   paymentIn: boolean;
   createdAt?: Date;
   paymentMode: "CASH" | "ONLINE" | "PRODCT_RETURN";

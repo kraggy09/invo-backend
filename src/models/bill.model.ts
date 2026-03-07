@@ -50,7 +50,7 @@ const billSchema = new Schema<IBill>(
         type: {
           type: String,
           required: true,
-          enum: ["WHOLESALE", "RETAIL", "SUPER_WHOLESALE"],
+          enum: ["WHOLESALE", "RETAIL", "SUPERWHOLESALE"],
         },
         total: {
           type: Number,
@@ -66,6 +66,10 @@ const billSchema = new Schema<IBill>(
         },
       },
     ],
+    productsTotal: {
+      type: Number,
+      required: true,
+    },
     total: {
       type: Number,
       required: true,

@@ -65,9 +65,11 @@ export const getSingleCustomer = async (req: Request, res: Response) => {
       return ApiResponse(res, 404, false, "Customer not found");
     }
 
-    let bills = await Bill.find({ customer: customerId }).sort({
-      createdAt: -1,
-    });
+    let bills = await Bill.find({ customer: customerId })
+      .populate("createdBy", "name email")
+      .sort({
+        createdAt: -1,
+      });
 
     let transactions = await Transaction.find({
       customer: customerId,

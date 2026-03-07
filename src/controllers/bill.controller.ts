@@ -144,6 +144,7 @@ export const createBill = async (req: Request, res: Response) => {
           {
             customer: customerId,
             items,
+            productsTotal: billTotal,
             total: netTotal,
             payment,
             discount,
@@ -216,9 +217,20 @@ export const createBill = async (req: Request, res: Response) => {
       };
     });
 
+    // Construct populated bill using already-available data (no extra DB call)
+    const user = (req as any).user;
+    const populatedBill = {
+      ...result.bill.toObject(),
+      customer: result.updatedCustomer,
+      createdBy: user
+        ? { _id: user._id, name: user.name, username: user.username }
+        : result.bill.createdBy,
+    };
+
     // Notify with socket.io
     const data = {
       ...result,
+      bill: populatedBill,
       socketId: req.headers.socketid,
     };
 
@@ -226,7 +238,7 @@ export const createBill = async (req: Request, res: Response) => {
     io.emit(EVENTS_MAP.BILL_CREATED, data);
 
     return ApiResponse(res, 201, true, "Bill created successfully", {
-      bill: result,
+      bill: { ...result, bill: populatedBill },
     });
   } catch (error: any) {
     console.error("❌ Bill creation error:", error);

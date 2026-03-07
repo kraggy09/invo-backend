@@ -3,14 +3,18 @@ import mongoose, { Types } from "mongoose";
 import Counter from "../models/counter.model";
 import ApiResponse from "../utils/ApiResponse";
 import Transaction from "../models/transaction.model";
-import { ApiError, getAclOfAUser } from "../utils";
+import { ApiError, getAclOfAUser, getCurrentDateAndTime } from "../utils";
 import Customer from "../models/customer.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
+import moment from "moment-timezone";
 
-export const createNewTransaction = async (req: Request, res: Response) => {
+const IST = "Asia/Kolkata";
+
+export const createNewTransaction = async (req: AuthenticatedRequest, res: Response) => {
   const { name, amount, purpose, transactionId } = req.body;
   const session = await mongoose.startSession();
+  const user = req.user
 
   try {
     const result = await session.withTransaction(async () => {
@@ -28,6 +32,7 @@ export const createNewTransaction = async (req: Request, res: Response) => {
         );
       }
 
+      console.log(previousTransactionId.value, transactionId);
       if (previousTransactionId.value !== transactionId) {
         throw new Error("Duplicate transaction!! Please refresh.");
       }
@@ -53,8 +58,11 @@ export const createNewTransaction = async (req: Request, res: Response) => {
             taken: true,
             purpose,
             approved: true,
+            approvedAt: moment.tz(getCurrentDateAndTime(), IST).toDate(),
+            approvedBy: user?._id || user?.id,
             paymentIn: false,
             paymentMode: "CASH",
+
           },
         ],
         { session }
@@ -71,7 +79,8 @@ export const createNewTransaction = async (req: Request, res: Response) => {
 
     const io = req.app.get("io");
     if (io && result && (result as any).newTransaction) {
-      io.emit(EVENTS_MAP.TRANSACTION_CREATED, (result as any).newTransaction);
+      const transactionToEmit = (result as any).newTransaction;
+      io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
     session.endSession();
@@ -168,9 +177,7 @@ export const createNewPayment = async (req: Request, res: Response) => {
     const io = req.app.get("io");
     if (io && result && (result as any).newTransaction) {
       const transactionToEmit = (result as any).newTransaction;
-      io.emit(EVENTS_MAP.TRANSACTION_CREATED, transactionToEmit);
-      const customer = await Customer.findById(transactionToEmit.customer);
-      if (customer) io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
+      io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
     session.endSession();
@@ -194,20 +201,22 @@ export const approveTransaction = async (
   let customer, transaction;
 
   const userId = req.user?.id;
-  const { transactionId } = req.params;
+  const transactionId = req.params.id;
+
+  console.log(transactionId, "This is the transactionID");
 
   try {
     await session.withTransaction(async () => {
-      const aclNames = await getAclOfAUser(userId as string);
+      // const aclNames = await getAclOfAUser(userId as string);
 
-      if (!aclNames.includes("TRANSACTION_RIGHTS")) {
-        return ApiResponse(
-          res,
-          401,
-          false,
-          "You are not authorised to approve or reject transaction"
-        );
-      }
+      // if (!aclNames.includes("TRANSACTION_RIGHTS")) {
+      //   return ApiResponse(
+      //     res,
+      //     403,
+      //     false,
+      //     "You are not authorised to approve or reject transaction"
+      //   );
+      // }
 
       transaction = await Transaction.findById(transactionId).session(session);
       if (!transaction) {
@@ -238,13 +247,17 @@ export const approveTransaction = async (
 
       // Approve the transaction
       transaction.approved = true;
+      transaction.approvedAt = moment.tz(getCurrentDateAndTime(), IST).toDate();
+      transaction.approvedBy = userId;
       await transaction.save({ session });
     });
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.TRANSACTION_UPDATED, transaction);
-      io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
+      io.emit(EVENTS_MAP.TRANSACTION_UPDATED, {
+        transaction, customer, purpose: "ACCEPT"
+      });
+      // io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
     }
 
     // Success response
@@ -254,10 +267,10 @@ export const approveTransaction = async (
       transaction,
     });
   } catch (error: any) {
+    console.log(error, "This is the error");
+
     if (error instanceof ApiError) {
-      return ApiResponse(res, error.statusCode, false, error.message, {
-        error: error.data,
-      });
+      return ApiResponse(res, error.statusCode, false, error.message, error.data);
     }
 
     return ApiResponse(res, 500, false, error.message || "Server Error");
@@ -271,19 +284,33 @@ export const rejectTransaction = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
-  let { transactionId } = req.params;
   const userId = req.user?.id;
+  const transactionId = req.params.id;
 
   try {
-    transactionId = transactionId;
-    const aclUsers = await getAclOfAUser(userId);
+    // const aclUsers = await getAclOfAUser(userId);
 
-    if (!aclUsers.includes("TRANSACTION_RIGHTS")) {
-      return ApiResponse(res, 401, false, "Unauthorised access for this");
-    }
-    let transaction = await Transaction.findByIdAndDelete(transactionId);
+    // if (!aclUsers.includes("TRANSACTION_RIGHTS")) {
+    //   return ApiResponse(res, 403, false, "Unauthorised access for this");
+    // }
+
+    // Changing from findByIdAndDelete to updating rejected status
+    let transaction = await Transaction.findById(transactionId);
     if (!transaction) {
       throw new Error("Transaction not found");
+    }
+
+    // Instead of deleting, just mark as rejected with timestamp
+    transaction.rejectedAt = moment.tz(getCurrentDateAndTime(), IST).toDate();
+    transaction.approvedBy = userId;
+    await transaction.save();
+
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit(EVENTS_MAP.TRANSACTION_UPDATED, {
+        transaction, purpose: "REJECT"
+      });
     }
     return ApiResponse(res, 200, true, "Transaction deleted successfully");
   } catch (error: any) {
@@ -293,8 +320,13 @@ export const rejectTransaction = async (
 
 export const getAllTransactions = async (req: Request, res: Response) => {
   try {
-    // Fetch transactions with approved set to false
-    const transactions = await Transaction.find({ approved: false });
+    // Fetch transactions with approved set to false AND not rejected
+    const transactions = await Transaction.find({
+      approved: false,
+      rejectedAt: { $exists: false }
+    }).sort({
+      createdAt: -1,
+    });
 
     // Return successful response with the transactions
     return ApiResponse(res, 200, true, "Transactions found successfully", {
@@ -365,6 +397,7 @@ export const getAllTransactionsInDateRange = async (
         $gte: start,
         $lte: end,
       },
+      approved: true
     })
       .populate("customer", "name phone")
       .populate("approvedBy", "name username");

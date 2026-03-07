@@ -35,7 +35,6 @@ const transactionSchema = new Schema<ITransaction>({
   approvedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
-    required: true,
   },
   name: {
     type: String,
@@ -57,6 +56,12 @@ const transactionSchema = new Schema<ITransaction>({
   paymentIn: {
     required: true,
     type: Boolean,
+  },
+  approvedAt: {
+    type: Date,
+  },
+  rejectedAt: {
+    type: Date,
   },
   createdAt: {
     type: Date,
