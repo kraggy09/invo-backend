@@ -16,9 +16,6 @@ const counterSchema = new Schema<ICounter>(
   },
   { timestamps: true }
 );
-
-counterSchema.index({ createdAt: 1 }, { expireAfterSeconds: 180 });
-
 const Counter = mongoose.model("Counter", counterSchema);
 
 export default Counter;

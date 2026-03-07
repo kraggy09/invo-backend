@@ -8,6 +8,7 @@ import Customer from "../models/customer.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import moment from "moment-timezone";
+import { addJourneyLog } from "../services/logger.service";
 
 const IST = "Asia/Kolkata";
 
@@ -83,10 +84,20 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
       io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
+    await addJourneyLog(
+      req,
+      "TRANSACTION_CREATED",
+      `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
+      (req.user as any)?._id || (req.user as any)?.id,
+      "Transaction",
+      (result as any)?.newTransaction?._id,
+      { amount, purpose, party: (result as any)?.newTransaction?.name }
+    );
+
     session.endSession();
 
     return ApiResponse(res, 201, true, "Transaction added successfully", {
-      transaction: result,
+      transaction: result as any,
     });
   } catch (error: any) {
     console.error("Error:", error.message);
@@ -180,10 +191,20 @@ export const createNewPayment = async (req: Request, res: Response) => {
       io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
+    await addJourneyLog(
+      req,
+      "PAYMENT_CREATED",
+      `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
+      (req as any).user?._id || null,
+      "Transaction",
+      (result as any)?.newTransaction?._id,
+      { amount, paymentMode, party: (result as any)?.newTransaction?.name }
+    );
+
     session.endSession();
 
     return ApiResponse(res, 201, true, "Payment recieved sucessfully", {
-      payment: result,
+      payment: result as any,
     });
   } catch (error: any) {
     console.error("Error:", error.message);
@@ -260,6 +281,16 @@ export const approveTransaction = async (
       // io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
     }
 
+    await addJourneyLog(
+      req,
+      "TRANSACTION_APPROVED",
+      `Transaction #${(transaction as any)?.id} was approved`,
+      userId,
+      "Transaction",
+      (transaction as any)?._id,
+      { amount: (transaction as any)?.amount }
+    );
+
     // Success response
 
     return ApiResponse(res, 200, true, "Transaction approved successfully", {
@@ -312,6 +343,16 @@ export const rejectTransaction = async (
         transaction, purpose: "REJECT"
       });
     }
+
+    await addJourneyLog(
+      req,
+      "TRANSACTION_REJECTED",
+      `Transaction #${(transaction as any)?.id} was rejected`,
+      userId,
+      "Transaction",
+      (transaction as any)?._id,
+      { amount: (transaction as any)?.amount }
+    );
     return ApiResponse(res, 200, true, "Transaction deleted successfully");
   } catch (error: any) {
     return ApiResponse(res, 500, false, error.message || "Server Error");

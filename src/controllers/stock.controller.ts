@@ -7,6 +7,7 @@ import ApiResponse from "../utils/ApiResponse";
 import { ApiError, getDate, getServerErrorLog } from "../utils";
 
 import Logger from "../models/logger.model";
+import { addJourneyLog } from "../services/logger.service";
 
 export const getAllRequests = async (
   req: AuthenticatedRequest,
@@ -71,7 +72,7 @@ export const getAllRequests = async (
 export const getInventoryRequestForDate = async (
   req: AuthenticatedRequest,
   res: Response
-) => {};
+) => { };
 
 export const updateInventoryRequest = async (
   req: AuthenticatedRequest,
@@ -187,6 +188,16 @@ export const updateInventoryRequest = async (
     }
     console.log("Inventory update request created:", result);
 
+    await addJourneyLog(
+      req,
+      "STOCK_REQUEST_CREATED",
+      `Stock update request created for ${products.length} products`,
+      userId,
+      "StockRequest",
+      null,
+      { count: products.length }
+    );
+
     // Success response
     return ApiResponse(res, 201, true, "Sent for verification to admin", {
       data: result,
@@ -275,6 +286,15 @@ export const rejectInventoryRequest = async (
     if (createdAt >= startTime && createdAt <= endTime) {
       io.emit("INVENTORY_REJECTED", result._id);
     }
+
+    await addJourneyLog(
+      req,
+      "STOCK_REQUEST_REJECTED",
+      `Stock update request was rejected`,
+      userId,
+      "StockRequest",
+      result._id
+    );
 
     return ApiResponse(res, 200, true, "Request rejected successfully", result);
   } catch (error: any) {
@@ -428,21 +448,13 @@ export const acceptAllInventoryRequest = async (
 
       // Prepare bulk operations arrays
       const productBulkOps = [];
-      const loggerEntries = [];
       const stockBulkOps = [];
 
       // Collect updated products details for emission
       const updatedProducts = [];
 
-      // Prepare today's date range boundaries
-      const currentDateStartTime = new Date();
-      currentDateStartTime.setHours(0, 0, 0, 0); // today 00:00:00.000
-
-      const currentDateLastTime = new Date();
-      currentDateLastTime.setHours(23, 59, 59, 999); // today 23:59:59.999
-
-      // Array to hold stock requests created today
-      const todayStockUpdates: any[] = [];
+      // Array to hold all stock requests that were updated
+      const updatedRequests: any[] = [];
 
       for (const [pid, { totalQty, product, requests }] of productUpdates) {
         const previousStock = product.stock;
@@ -456,25 +468,10 @@ export const acceptAllInventoryRequest = async (
           },
         });
 
-        // Logger entry (aggregated update per product)
-        loggerEntries.push({
-          name: "STOCK_UPDATE",
-          previousQuantity: previousStock,
-          newQuantity: newStock,
-          quantity: totalQty,
-          product: product._id,
-        });
-
         // Update all stock requests for this product
         for (const s of requests) {
-          // Check if createdAt is today, push into todayStockUpdates if yes
-          const createdAtTime = s.createdAt;
-          if (
-            createdAtTime >= currentDateStartTime &&
-            createdAtTime <= currentDateLastTime
-          ) {
-            todayStockUpdates.push({ ...s, previousStock, newStock, totalQty });
-          }
+          // Push the request into updatedRequests array
+          updatedRequests.push({ ...s, previousStock, newStock, totalQty });
 
           // Push bulk update operation for stock request
           stockBulkOps.push({
@@ -506,9 +503,6 @@ export const acceptAllInventoryRequest = async (
       if (productBulkOps.length > 0) {
         await Product.bulkWrite(productBulkOps, { session });
       }
-      if (loggerEntries.length > 0) {
-        await Logger.insertMany(loggerEntries, { session });
-      }
       if (stockBulkOps.length > 0) {
         await Stock.bulkWrite(stockBulkOps, { session });
       }
@@ -516,7 +510,7 @@ export const acceptAllInventoryRequest = async (
       return {
         updatedCount: requestIds.length,
         updatedProducts,
-        todayStockUpdates,
+        updatedRequests,
       };
     });
 
@@ -525,6 +519,19 @@ export const acceptAllInventoryRequest = async (
     if (io) {
       io.emit("INVENTORY_UPDATED", { action: "acceptAll", data: result });
     }
+
+    await addJourneyLog(
+      req,
+      "STOCK_REQUEST_APPROVED",
+      `Stock update requests for ${result.updatedCount} products approved`,
+      userId,
+      "StockRequest",
+      null,
+      {
+        updatedCount: result.updatedCount,
+        stockChanges: result.updatedProducts
+      }
+    );
 
     return ApiResponse(res, 200, true, `All stock updates successful`);
   } catch (error: any) {

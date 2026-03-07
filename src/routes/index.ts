@@ -7,6 +7,8 @@ import customerRouter from "./customer.route";
 import transactionRouter from "./transaction.route";
 import categoryRouter from "./category.route";
 import adminRouter from "./admin.route";
+import journeyRouter from "./journey.route";
+import returnBillRouter from "./returnBill.route";
 import { verifyToken } from "../services/token.service";
 
 const rootRouter = express.Router();
@@ -21,9 +23,11 @@ rootRouter.use(verifyToken);
 rootRouter.use("/products", productRouter);
 rootRouter.use("/stocks", stockRouter);
 rootRouter.use("/bills", billRouter);
+rootRouter.use("/return-bills", returnBillRouter);
 rootRouter.use("/customers", customerRouter);
 rootRouter.use("/transactions", transactionRouter);
 rootRouter.use("/categories", categoryRouter);
 rootRouter.use("/admin", adminRouter);
+rootRouter.use("/journey-logs", journeyRouter);
 
 export default rootRouter;

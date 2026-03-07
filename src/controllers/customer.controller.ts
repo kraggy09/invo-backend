@@ -2,9 +2,11 @@ import Customer from "../models/customer.model";
 import { Request, Response } from "express";
 import ApiResponse from "../utils/ApiResponse";
 import Bill from "../models/bill.model";
+import ReturnBill from "../models/returnBill.model";
 import Transaction from "../models/transaction.model";
 import { EVENTS_MAP } from "../constant/redisMap";
 import mongoose from "mongoose";
+import { addJourneyLog } from "../services/logger.service";
 
 export const createNewCustomer = async (req: Request, res: Response) => {
   try {
@@ -33,6 +35,16 @@ export const createNewCustomer = async (req: Request, res: Response) => {
     if (io) {
       io.emit(EVENTS_MAP.CUSTOMER_CREATED, newCustomer);
     }
+
+    await addJourneyLog(
+      req,
+      "CUSTOMER_CREATED",
+      `Customer ${newCustomer.name} created`,
+      (req as any).user?._id || null,
+      "Customer",
+      newCustomer._id,
+      { phone: newCustomer.phone, outstanding: newCustomer.outstanding }
+    );
 
     return ApiResponse(res, 201, true, "Customer created successfully", {
       customer: newCustomer,
@@ -71,6 +83,12 @@ export const getSingleCustomer = async (req: Request, res: Response) => {
         createdAt: -1,
       });
 
+    let returnBills = await ReturnBill.find({ customer: customerId })
+      .populate("createdBy", "name email")
+      .sort({
+        createdAt: -1,
+      });
+
     let transactions = await Transaction.find({
       customer: customerId,
       approved: true,
@@ -78,7 +96,7 @@ export const getSingleCustomer = async (req: Request, res: Response) => {
       createdAt: -1,
     });
 
-    const newCustomer = { ...customer.toObject(), bills, transactions };
+    const newCustomer = { ...customer.toObject(), bills, returnBills, transactions };
 
     return ApiResponse(res, 200, true, "Customer found successfully", {
       customer: newCustomer,

@@ -18,6 +18,7 @@ import { IStock } from "../types/stock.type";
 import Stock from "../models/stock.model";
 import moment from "moment-timezone";
 import { EVENTS_MAP } from "../constant/redisMap";
+import { addJourneyLog } from "../services/logger.service";
 
 const IST = "Asia/Kolkata"; // Update with the correct path
 
@@ -140,6 +141,16 @@ export const createNewProduct = async (req: Request, res: Response) => {
       io.emit(EVENTS_MAP.PRODUCT_CREATED, newProduct);
     }
 
+    await addJourneyLog(
+      req,
+      "PRODUCT_CREATED",
+      `Product ${newProduct.name} created`,
+      (req as any).user?._id || null,
+      "Product",
+      newProduct._id,
+      { mrp: newProduct.mrp, stock: newProduct.stock }
+    );
+
     // Return response
     return ApiResponse(res, 201, true, `Product created successfully`, {
       product: newProduct,
@@ -241,22 +252,23 @@ export const updateProductDetails = async (req: Request, res: Response) => {
     }
 
     const existingProduct = await Product.findOne({
+      _id: { $ne: id || productId },
       barcode: { $in: updatedData.barcode },
     });
 
-    const existingProductId = existingProduct?._id as string;
-
-    if (existingProduct && existingProductId !== productId) {
+    if (existingProduct) {
       return ApiResponse(
         res,
         409,
         false,
-        "Barcode in use for another product",
+        "One or more barcodes are already in use by another product",
         {
           existingProduct,
         }
       );
     }
+
+    const previousProduct = await Product.findById(id || productId);
 
     const updatedProduct = await Product.findByIdAndUpdate(
       id || productId,
@@ -272,6 +284,35 @@ export const updateProductDetails = async (req: Request, res: Response) => {
     if (io) {
       io.emit(EVENTS_MAP.PRODUCT_UPDATED, updatedProduct);
     }
+
+    await addJourneyLog(
+      req,
+      "PRODUCT_UPDATED",
+      `Product ${updatedProduct.name} updated`,
+      (req as any).user?._id || null,
+      "Product",
+      updatedProduct._id,
+      {
+        stock: updatedProduct.stock,
+        mrp: updatedProduct.mrp,
+        costPrice: updatedProduct.costPrice,
+        retailPrice: updatedProduct.retailPrice,
+        wholesalePrice: updatedProduct.wholesalePrice,
+        superWholesalePrice: updatedProduct.superWholesalePrice,
+        packet: updatedProduct.packet,
+        box: updatedProduct.box,
+        beforeUpdate: previousProduct ? {
+          stock: previousProduct.stock,
+          mrp: previousProduct.mrp,
+          costPrice: previousProduct.costPrice,
+          retailPrice: previousProduct.retailPrice,
+          wholesalePrice: previousProduct.wholesalePrice,
+          superWholesalePrice: previousProduct.superWholesalePrice,
+          packet: previousProduct.packet,
+          box: previousProduct.box,
+        } : "fetch-error"
+      }
+    );
 
     return ApiResponse(res, 200, true, "Product Updated Successfully", {
       product: updatedProduct,
@@ -295,6 +336,15 @@ export const deleteProduct = async (req: Request, res: Response) => {
         if (io) {
           io.emit(EVENTS_MAP.PRODUCT_DELETED, deletedProduct._id);
         }
+
+        await addJourneyLog(
+          req,
+          "PRODUCT_DELETED",
+          `Product ${deletedProduct.name} deleted`,
+          (req as any).user?._id || null,
+          "Product",
+          deletedProduct._id
+        );
         return ApiResponse(res, 201, true, "Product deleted successfully");
       }
     }
@@ -346,7 +396,6 @@ export const returnProduct = async (
 
       // Prepare bulk operations for product stock updates and logger entries
       const productBulkOperations = [];
-      const loggerEntries = [];
       const items = [];
 
       for (const product of purchased) {
@@ -374,14 +423,6 @@ export const returnProduct = async (
           );
         }
 
-        // Prepare logger entry
-        loggerEntries.push({
-          name: "Product Return",
-          previousQuantity: availableProduct.stock,
-          newQuantity: availableProduct.stock + quantity,
-          quantity,
-          product: availableProduct._id,
-        });
 
         // Prepare item details for daily report
         items.push({
@@ -399,8 +440,6 @@ export const returnProduct = async (
         throw new ApiError(500, "Failed to update all product stocks");
       }
 
-      // Insert logger entries in bulk
-      await Logger.insertMany(loggerEntries, { session });
 
       // Handle return type
       let transaction = null;
@@ -540,6 +579,16 @@ export const returnProduct = async (
       }
 
       // Success response
+      await addJourneyLog(
+        req,
+        "PRODUCT_RETURNED",
+        `Products returned for bill #${billId}`,
+        user._id,
+        "Transaction",
+        transaction ? transaction[0]?._id : undefined,
+        { itemsCount: items.length }
+      );
+
       return ApiResponse(res, 200, true, "Updated successfully", {
         transaction,
       });

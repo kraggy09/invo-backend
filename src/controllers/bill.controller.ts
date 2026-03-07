@@ -10,6 +10,7 @@ import Transaction from "../models/transaction.model";
 import moment from "moment-timezone";
 import { ApiError } from "../utils";
 import { EVENTS_MAP } from "../constant/redisMap";
+import { addJourneyLog } from "../services/logger.service";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createBill = async (req: Request, res: Response) => {
@@ -66,7 +67,6 @@ export const createBill = async (req: Request, res: Response) => {
       let billTotal = 0;
       const items: any[] = [];
       const productBulkOps: any[] = [];
-      const loggerEntries: any[] = [];
 
       for (const productInput of products) {
         const quantity =
@@ -94,14 +94,6 @@ export const createBill = async (req: Request, res: Response) => {
           },
         });
 
-        // Push to items and logger arrays
-        loggerEntries.push({
-          name: "Billing",
-          previousQuantity: product.stock,
-          quantity,
-          newQuantity: product.stock - quantity,
-          product: product._id,
-        });
 
         items.push({
           costPrice: product.costPrice,
@@ -122,8 +114,6 @@ export const createBill = async (req: Request, res: Response) => {
         throw new ApiError(500, "Product stock update mismatch");
       }
 
-      // Logger
-      await Logger.insertMany(loggerEntries, { session });
 
       const netTotal = Math.ceil(billTotal + customer.outstanding - discount);
 
@@ -237,6 +227,20 @@ export const createBill = async (req: Request, res: Response) => {
     const io = req.app.get("io");
     io.emit(EVENTS_MAP.BILL_CREATED, data);
 
+    await addJourneyLog(
+      req,
+      "BILL_CREATED",
+      `Bill #${result.billId} created for ${result.updatedCustomer.name} with total ₹${result.bill.total}`,
+      createdBy,
+      "Bill",
+      populatedBill._id,
+      {
+        itemsCount: populatedBill.items.length,
+        paymentReceived: payment,
+        items: populatedBill.items.map((i: any) => ({ product: i.product?.name || i.product, quantity: i.quantity, price: i.price }))
+      }
+    );
+
     return ApiResponse(res, 201, true, "Bill created successfully", {
       bill: { ...result, bill: populatedBill },
     });
@@ -254,14 +258,25 @@ export const createBill = async (req: Request, res: Response) => {
 export const getBillDetails = async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
-    console.log(req.params, "This is the params of the bill");
 
-    console.log(id, "This is the id of the bill");
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(id);
+    let bill;
 
-    const bill = await Bill.findById(id)
-      .populate("items.product")
-      .populate("customer")
-      .populate("createdBy", "name username");
+    if (isObjectId) {
+      bill = await Bill.findById(id)
+        .populate("items.product")
+        .populate("customer")
+        .populate("createdBy", "name username");
+    } else {
+      const numericId = Number(id);
+      if (isNaN(numericId)) {
+        return ApiResponse(res, 400, false, "Invalid bill ID format");
+      }
+      bill = await Bill.findOne({ id: numericId })
+        .populate("items.product")
+        .populate("customer")
+        .populate("createdBy", "name username");
+    }
 
     if (!bill) {
       return ApiResponse(res, 404, false, "Failed to get the data of the bill");

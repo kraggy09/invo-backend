@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import Category from "../models/category.model";
 import ApiResponse from "../utils/ApiResponse";
+import { addJourneyLog } from "../services/logger.service";
 
 export const createNewCategory = async (req: Request, res: Response) => {
   let { name, wholesale, superWholeSale } = req.body;
@@ -31,6 +32,16 @@ export const createNewCategory = async (req: Request, res: Response) => {
         { new: true } // Return the updated document
       );
 
+      await addJourneyLog(
+        req,
+        "CATEGORY_UPDATED",
+        `Category ${name} was updated`,
+        (req as any).user?._id || null,
+        "Category",
+        updatedCategory?._id,
+        { wholesale, superWholeSale }
+      );
+
       return ApiResponse(res, 200, true, "Category updated successfully", {
         category: updatedCategory,
       });
@@ -40,6 +51,16 @@ export const createNewCategory = async (req: Request, res: Response) => {
         wholesale,
         superWholeSale,
       });
+
+      await addJourneyLog(
+        req,
+        "CATEGORY_CREATED",
+        `Category ${name} was created`,
+        (req as any).user?._id || null,
+        "Category",
+        newCategory._id,
+        { wholesale, superWholeSale }
+      );
 
       return ApiResponse(res, 200, true, "New category created successfully", {
         category: newCategory,

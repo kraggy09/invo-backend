@@ -69,7 +69,7 @@ const transactionSchema = new Schema<ITransaction>({
   },
   paymentMode: {
     type: String,
-    enum: ["CASH", "ONINE", "PRODUCT_RETURN"],
+    enum: ["CASH", "ONINE", "PRODUCT_RETURN", "ADJUSTMENT"],
     required: true,
   },
 });
