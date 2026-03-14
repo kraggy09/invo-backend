@@ -186,7 +186,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                             newOutstanding: newOutstanding,
                             paymentMode: "ADJUSTMENT",
                             approved: true,
-                            paymentIn: false,
+                            paymentIn: true,
                             approvedBy: createdBy,
                             customer: customer._id,
                         },
@@ -244,6 +244,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
             io.emit(EVENTS_MAP.RETURN_BILL_CREATED, {
                 returnBill: populatedRB,
                 transaction: result.transaction,
+                updatedOutstanding: result.updatedOutstanding,
                 socketId: req.headers.socketid
             });
         }
