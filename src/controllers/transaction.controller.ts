@@ -8,7 +8,7 @@ import Customer from "../models/customer.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import moment from "moment-timezone";
-import { addJourneyLog } from "../services/logger.service";
+import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
 
 const IST = "Asia/Kolkata";
 
@@ -92,6 +92,19 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
       "Transaction",
       (result as any)?.newTransaction?._id,
       { amount, purpose, party: (result as any)?.newTransaction?.name }
+    );
+
+    await addCustomerJourneyLog(
+      req,
+      (result as any)?.newTransaction?.customer,
+      "TRANSACTION_CREATED",
+      `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
+      (req.user as any)?._id || (req.user as any)?.id,
+      amount,
+      (result as any)?.newTransaction?.previousOutstanding || 0,
+      (result as any)?.newTransaction?.newOutstanding || 0,
+      (result as any)?.newTransaction?._id,
+      { purpose, paymentIn: false, paymentMode: "CASH" }
     );
 
     session.endSession();
@@ -201,6 +214,19 @@ export const createNewPayment = async (req: Request, res: Response) => {
       { amount, paymentMode, party: (result as any)?.newTransaction?.name }
     );
 
+    await addCustomerJourneyLog(
+      req,
+      customerId,
+      "PAYMENT_CREATED",
+      `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
+      (req as any).user?._id || null,
+      amount,
+      (result as any)?.newTransaction?.previousOutstanding,
+      (result as any)?.newTransaction?.newOutstanding,
+      (result as any)?.newTransaction?._id,
+      { paymentMode, paymentIn: true }
+    );
+
     session.endSession();
 
     return ApiResponse(res, 201, true, "Payment recieved sucessfully", {
@@ -291,6 +317,19 @@ export const approveTransaction = async (
       { amount: (transaction as any)?.amount }
     );
 
+    await addCustomerJourneyLog(
+      req,
+      (transaction as any)?.customer,
+      "TRANSACTION_APPROVED",
+      `Transaction #${(transaction as any)?.id} of ₹${(transaction as any)?.amount} was approved`,
+      userId,
+      (transaction as any)?.amount,
+      (transaction as any)?.previousOutstanding,
+      (transaction as any)?.newOutstanding,
+      (transaction as any)?._id,
+      { paymentIn: (transaction as any)?.paymentIn }
+    );
+
     // Success response
 
     return ApiResponse(res, 200, true, "Transaction approved successfully", {
@@ -352,6 +391,19 @@ export const rejectTransaction = async (
       "Transaction",
       (transaction as any)?._id,
       { amount: (transaction as any)?.amount }
+    );
+
+    await addCustomerJourneyLog(
+      req,
+      (transaction as any)?.customer,
+      "TRANSACTION_REJECTED",
+      `Transaction #${(transaction as any)?.id} of ₹${(transaction as any)?.amount} was rejected`,
+      userId,
+      (transaction as any)?.amount,
+      (transaction as any)?.previousOutstanding,
+      (transaction as any)?.previousOutstanding, // Remains same as previous
+      (transaction as any)?._id,
+      { paymentIn: (transaction as any)?.paymentIn }
     );
     return ApiResponse(res, 200, true, "Transaction deleted successfully");
   } catch (error: any) {

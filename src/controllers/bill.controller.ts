@@ -10,7 +10,7 @@ import Transaction from "../models/transaction.model";
 import moment from "moment-timezone";
 import { ApiError } from "../utils";
 import { EVENTS_MAP } from "../constant/redisMap";
-import { addJourneyLog } from "../services/logger.service";
+import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createBill = async (req: Request, res: Response) => {
@@ -239,6 +239,19 @@ export const createBill = async (req: Request, res: Response) => {
         paymentReceived: payment,
         items: populatedBill.items.map((i: any) => ({ product: i.product?.name || i.product, quantity: i.quantity, price: i.price }))
       }
+    );
+
+    await addCustomerJourneyLog(
+      req,
+      customerId,
+      "BILL_CREATED",
+      `Bill #${result.billId} created for ₹${result.bill.productsTotal} ${payment > 0 ? `with payment of ₹${payment}` : ""}`,
+      createdBy,
+      result.bill.productsTotal,
+      (result.bill.total - result.bill.productsTotal),
+      result.updatedCustomer.outstanding,
+      populatedBill._id,
+      { paymentReceived: payment, itemsCount: populatedBill.items.length }
     );
 
     return ApiResponse(res, 201, true, "Bill created successfully", {

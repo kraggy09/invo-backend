@@ -12,7 +12,7 @@ import Stock from "../models/stock.model";
 import moment from "moment-timezone";
 
 const IST = "Asia/Kolkata";
-import { addJourneyLog } from "../services/logger.service";
+import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
 import { EVENTS_MAP } from "../constant/redisMap";
 
 // Helper function to extract logged-in user ID
@@ -263,6 +263,19 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 paymentMode,
                 totalAmount
             }
+        );
+
+        await addCustomerJourneyLog(
+            req,
+            customerId,
+            "PRODUCT_RETURN",
+            `Return Bill #${populatedRB?.id} created for ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
+            createdBy,
+            totalAmount,
+            populatedRB?.previousOutstanding,
+            populatedRB?.newOutstanding,
+            populatedRB?._id,
+            { originalBillId, itemsCount: items.length, paymentMode }
         );
 
         return ApiResponse(res, 201, true, "Return bill created successfully", {

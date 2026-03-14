@@ -5,6 +5,7 @@ import Bill from "../models/bill.model";
 import ReturnBill from "../models/returnBill.model";
 import Transaction from "../models/transaction.model";
 import { EVENTS_MAP } from "../constant/redisMap";
+import CustomerJourney from "../models/customerJourney.model";
 import mongoose from "mongoose";
 import { addJourneyLog } from "../services/logger.service";
 
@@ -96,7 +97,13 @@ export const getSingleCustomer = async (req: Request, res: Response) => {
       createdAt: -1,
     });
 
-    const newCustomer = { ...customer.toObject(), bills, returnBills, transactions };
+    let journeys = await CustomerJourney.find({ customer: customerId })
+      .populate("user", "name username")
+      .sort({
+        createdAt: -1,
+      });
+
+    const newCustomer = { ...customer.toObject(), bills, returnBills, transactions, journeys };
 
     return ApiResponse(res, 200, true, "Customer found successfully", {
       customer: newCustomer,
