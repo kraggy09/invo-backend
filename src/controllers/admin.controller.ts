@@ -6,43 +6,98 @@ import Bill from "../models/bill.model";
 import Transaction from "../models/transaction.model";
 import Customer from "../models/customer.model";
 import mongoose from "mongoose";
+import ACL from "../models/acl.model";
+import ACLUser from "../models/aclUser.model";
 
 export const addUserToCompany = async (req: Request, res: Response) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const { name, username, password } = req.body;
-    const user = await User.findOne({ username });
+    const { name, username, password, aclId } = req.body;
+    const user = await User.findOne({ username }).session(session);
     if (user) {
+      await session.abortTransaction();
+      session.endSession();
       return ApiResponse(res, 404, false, "User already exists");
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const newUser = await User.create({
-      name,
-      username,
-      password: hashedPassword,
-    });
+    const newUser = await User.create(
+      [
+        {
+          name,
+          username,
+          password: hashedPassword,
+        },
+      ],
+      { session }
+    );
 
-    if (!newUser) {
+    if (!newUser || newUser.length === 0) {
+      await session.abortTransaction();
+      session.endSession();
       return ApiResponse(res, 400, false, "Unable to create user");
     }
 
+    if (aclId) {
+      await ACLUser.create(
+        [
+          {
+            user: newUser[0]._id,
+            acl: aclId,
+          },
+        ],
+        { session }
+      );
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
     return ApiResponse(res, 201, true, "User created successfully", {
-      user: newUser,
+      user: newUser[0],
     });
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
     return ApiResponse(res, 500, false, "Internal Server Error", error);
   }
 };
 
 export const getAllUsers = async (req: Request, res: Response) => {
   try {
-    const users = await User.find().select("-password");
+    const users = await User.find().select("-password").lean();
     if (!users) {
       return ApiResponse(res, 400, false, "No users found");
     }
 
-    return ApiResponse(res, 200, true, "Users found", { users });
+    // Populate roles for each user
+    const usersWithRoles = await Promise.all(
+      users.map(async (user: any) => {
+        const userAclEntries = await ACLUser.find({ user: user._id })
+          .populate("acl", "name")
+          .select("acl")
+          .lean();
+        const roles = userAclEntries
+          .map((entry: any) => entry.acl?.name)
+          .filter(Boolean);
+        return { ...user, roles };
+      })
+    );
+
+    return ApiResponse(res, 200, true, "Users found", {
+      users: usersWithRoles,
+    });
+  } catch (error) {
+    return ApiResponse(res, 500, false, "Internal Server Error", error);
+  }
+};
+
+export const getAllAclRoles = async (req: Request, res: Response) => {
+  try {
+    const acls = await ACL.find();
+    return ApiResponse(res, 200, true, "ACLs found", { acls });
   } catch (error) {
     return ApiResponse(res, 500, false, "Internal Server Error", error);
   }

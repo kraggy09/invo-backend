@@ -5,6 +5,7 @@ import User from "../models/user.model";
 import ApiResponse from "../utils/ApiResponse";
 import { generateToken } from "../services/token.service";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import { getAclOfAUser } from "../utils";
 
 export const checkAuth = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -14,10 +15,11 @@ export const checkAuth = async (req: AuthenticatedRequest, res: Response) => {
     }
     const userId = user._id as string;
     const token = await generateToken(userId);
+    const roles = await getAclOfAUser(userId);
     const userWithoutPassword = user.toObject();
     delete userWithoutPassword.password; // Remove password from the response
     return ApiResponse(res, 200, true, "User authenticated successfully", {
-      user: userWithoutPassword,
+      user: { ...userWithoutPassword, roles },
 
       token,
     });
@@ -64,6 +66,7 @@ export const login = async (req: Request, res: Response) => {
 
     const userId = user._id as string;
     const token = await generateToken(userId);
+    const roles = await getAclOfAUser(userId);
 
     const userWithoutPassword = user.toObject();
 
@@ -71,7 +74,7 @@ export const login = async (req: Request, res: Response) => {
     session.endSession();
 
     return ApiResponse(res, 200, true, "User login successful", {
-      user: userWithoutPassword,
+      user: { ...userWithoutPassword, roles },
       token,
     });
   } catch (error: any) {
