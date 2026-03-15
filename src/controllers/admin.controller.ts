@@ -444,6 +444,106 @@ export const getAdminData = async (req: Request, res: Response) => {
   }
 };
 
+export const assignRoleToUser = async (req: Request, res: Response) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const { userId, aclId } = req.body;
+
+    if (!userId || !aclId) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 400, false, "User ID and Role ID are required");
+    }
+
+    // Check if user exists
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 404, false, "User not found");
+    }
+
+    // Check if role exists
+    const acl = await ACL.findById(aclId).session(session);
+    if (!acl) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 404, false, "Role not found");
+    }
+
+    // Check if user already has this role
+    const existingAclUser = await ACLUser.findOne({ user: userId, acl: aclId }).session(session);
+    if (existingAclUser) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 400, false, "User already has this role");
+    }
+
+    // Assign the role
+    await ACLUser.create([{ user: userId, acl: aclId }], { session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return ApiResponse(res, 200, true, "Role assigned successfully");
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    return ApiResponse(res, 500, false, "Internal Server Error", error);
+  }
+};
+
+export const deleteUser = async (req: Request, res: Response) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 400, false, "User ID is required");
+    }
+
+    // Check if user exists
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 404, false, "User not found");
+    }
+
+    // Check user roles
+    const userAclEntries = await ACLUser.find({ user: userId })
+      .populate("acl", "name")
+      .session(session);
+
+    const roles = userAclEntries
+      .map((entry: any) => entry.acl?.name)
+      .filter(Boolean);
+
+    if (roles.includes("SUPER_ADMIN") || roles.includes("CREATOR")) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 403, false, "Cannot delete users with SUPER_ADMIN or CREATOR roles");
+    }
+
+    // Delete user and their ACL entries
+    await ACLUser.deleteMany({ user: userId }).session(session);
+    await User.findByIdAndDelete(userId).session(session);
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return ApiResponse(res, 200, true, "User deleted successfully");
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    return ApiResponse(res, 500, false, "Internal Server Error", error);
+  }
+};
+
 //Todo: Low Priority (Write an aggreagate function to get the profit of the single customer too)
 
 export const getCustomerData = async (req: Request, res: Response) => {

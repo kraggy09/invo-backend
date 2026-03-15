@@ -15,12 +15,12 @@ export const checkAuth = async (req: AuthenticatedRequest, res: Response) => {
     }
     const userId = user._id as string;
     const token = await generateToken(userId);
-    const roles = await getAclOfAUser(userId);
+
+    // roles are already attached to req.user by verifyToken middleware
     const userWithoutPassword = user.toObject();
     delete userWithoutPassword.password; // Remove password from the response
     return ApiResponse(res, 200, true, "User authenticated successfully", {
-      user: { ...userWithoutPassword, roles },
-
+      user: { ...userWithoutPassword, roles: user.roles },
       token,
     });
   } catch (error) {

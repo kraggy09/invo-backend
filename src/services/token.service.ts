@@ -3,6 +3,7 @@ import ApiResponse from "../utils/ApiResponse";
 import { Response, NextFunction } from "express";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import User from "../models/user.model";
+import { getAclOfAUser } from "../utils";
 
 export const generateToken = async (userId: string) => {
   const secret = process.env.JWT_SECRET as string;
@@ -52,8 +53,12 @@ export const verifyToken = async (
   if (!user) {
     return ApiResponse(res, 401, false, "User not found");
   }
-  // Attach user ID to the request object for further use
 
+  // Fetch and attach roles
+  const roles = await getAclOfAUser(user._id as string);
+  user.roles = roles;
+
+  // Attach user ID to the request object for further use
   req.user = user;
   next();
 };

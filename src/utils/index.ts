@@ -31,7 +31,7 @@ export const getCurrentDateOfUser = (date: Date) => {
   return currentDate;
 };
 
-export const getAclOfAUser = async (userId: string) => {
+export const getAclOfAUser = async (userId: string): Promise<string[]> => {
   const userAclEntries = await ACLUser.find({ user: userId })
     .populate("acl", "name")
     .select("acl");
@@ -43,7 +43,7 @@ export const getAclOfAUser = async (userId: string) => {
       }
       return null;
     })
-    .filter(Boolean);
+    .filter((name): name is string => name !== null);
   return aclNames;
 };
 

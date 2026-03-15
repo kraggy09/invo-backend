@@ -4,4 +4,5 @@ export interface IUser extends Document {
   username: string;
   password: string;
   pin?: string;
+  roles?: string[];
 }
