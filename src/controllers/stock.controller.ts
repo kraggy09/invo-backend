@@ -4,9 +4,8 @@ import Product from "../models/product.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import Stock from "../models/stock.model";
 import ApiResponse from "../utils/ApiResponse";
-import { ApiError, getDate, getServerErrorLog } from "../utils";
+import { ApiError, getServerErrorLog } from "../utils";
 
-import Logger from "../models/logger.model";
 import { addJourneyLog } from "../services/logger.service";
 
 export const getAllRequests = async (
@@ -45,12 +44,12 @@ export const getAllRequests = async (
       },
     })
       .populate([
-        { path: "product", select: "name stock" }, // Populate product details (adjust fields as needed)
-        { path: "createdBy", select: "name username" }, // Populate creator
-        { path: "actionBy", select: "name username" }, // Populate approver/rejector if any
+        { path: "product", select: "name stock" },
+        { path: "createdBy", select: "name username" },
+        { path: "actionBy", select: "name username" },
       ])
-      .sort({ date: -1 }) // Newest first
-      .lean() // Faster: plain JS objects
+      .sort({ createdAt: -1 })
+      .lean()
       .exec();
 
     if (requests.length > 0) {
@@ -246,9 +245,13 @@ export const rejectInventoryRequest = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
-  console.log(req.params.id);
+
   const { id } = req.params;
-  const userId = req.user?.id || req.user?._id; // Assuming user ID is available in req.user
+  const user = req.user;
+  if (!user) {
+    return ApiResponse(res, 401, false, "User not found");
+  }
+  const userId = user.id || user._id;
   const session = await mongoose.startSession();
 
   try {
@@ -279,9 +282,9 @@ export const rejectInventoryRequest = async (
 
     const io = req.app.get("io");
     const startTime = new Date();
-    startTime.setHours(0, 0, 0, 0); // Set to start of the day
+    startTime.setHours(0, 0, 0, 0);
     const endTime = new Date();
-    endTime.setHours(23, 59, 59, 999); // Set to end of the day
+    endTime.setHours(23, 59, 59, 999);
     const createdAt = result.createdAt;
     if (createdAt >= startTime && createdAt <= endTime) {
       io.emit("INVENTORY_REJECTED", result._id);

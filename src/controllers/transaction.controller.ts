@@ -254,17 +254,6 @@ export const approveTransaction = async (
 
   try {
     await session.withTransaction(async () => {
-      // const aclNames = await getAclOfAUser(userId as string);
-
-      // if (!aclNames.includes("TRANSACTION_RIGHTS")) {
-      //   return ApiResponse(
-      //     res,
-      //     403,
-      //     false,
-      //     "You are not authorised to approve or reject transaction"
-      //   );
-      // }
-
       transaction = await Transaction.findById(transactionId).session(session);
       if (!transaction) {
         throw new Error("Transaction not found");
@@ -358,12 +347,6 @@ export const rejectTransaction = async (
   const transactionId = req.params.id;
 
   try {
-    // const aclUsers = await getAclOfAUser(userId);
-
-    // if (!aclUsers.includes("TRANSACTION_RIGHTS")) {
-    //   return ApiResponse(res, 403, false, "Unauthorised access for this");
-    // }
-
     // Changing from findByIdAndDelete to updating rejected status
     let transaction = await Transaction.findById(transactionId);
     if (!transaction) {

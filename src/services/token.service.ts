@@ -62,3 +62,23 @@ export const verifyToken = async (
   req.user = user;
   next();
 };
+
+
+export const isAllowed = (allowedRoles: string[]) => {
+  return async (req: AuthenticatedRequest, response: Response, next: NextFunction) => {
+    const user = req.user;
+    if (!user) {
+      return ApiResponse(response, 401, false, "Unauthorized");
+    }
+    const userRoles = user.roles;
+    if (!userRoles) {
+      return ApiResponse(response, 401, false, "Unauthorized");
+    }
+
+    const isAllowed = allowedRoles.some((role) => userRoles.includes(role));
+    if (!isAllowed) {
+      return ApiResponse(response, 403, false, "You are not authorized to perform this action");
+    }
+    next();
+  };
+};

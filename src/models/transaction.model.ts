@@ -65,14 +65,14 @@ const transactionSchema = new Schema<ITransaction>({
   },
   createdAt: {
     type: Date,
-    default: () => moment.tz(getCurrentDateAndTime(), IST),
+    default: () => moment.tz(IST).toDate(),
   },
   paymentMode: {
     type: String,
-    enum: ["CASH", "ONINE", "PRODUCT_RETURN", "ADJUSTMENT"],
+    enum: ["CASH", "ONLINE", "PRODUCT_RETURN", "ADJUSTMENT"],
     required: true,
   },
-});
+}, { timestamps: true });
 
 transactionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 5284000 });
 

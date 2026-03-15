@@ -12,7 +12,7 @@ export interface IItems extends Document {
   costPrice: number;
 }
 
-export interface IBill {
+export interface IBill extends Document {
   id: number;
   date: Date;
   customer: mongoose.Types.ObjectId | string;
@@ -22,4 +22,6 @@ export interface IBill {
   total: number;
   payment: number;
   discount: number;
+  createdAt?: Date;
+  updatedAt?: Date;
 }

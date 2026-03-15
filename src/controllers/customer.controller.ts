@@ -245,3 +245,151 @@ export const getCustomerAnalytics = async (req: Request, res: Response) => {
     return ApiResponse(res, 500, false, "Internal Server Error", error.message);
   }
 };
+
+export const getCustomerHistory = async (req: Request, res: Response) => {
+  try {
+    const customerId = req.params.id;
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return ApiResponse(res, 400, false, "Please provide both startDate and endDate");
+    }
+
+    const start = new Date(startDate as string);
+    const end = new Date(endDate as string);
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return ApiResponse(res, 404, false, "Customer not found");
+    }
+
+    // 1. Calculate Opening Balance before 'start' using aggregation
+    // This is much faster than fetching all history
+    const [billsBefore, txnsBefore, returnsBefore] = await Promise.all([
+      Bill.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(customerId), createdAt: { $lt: start } } },
+        {
+          $group: {
+            _id: null,
+            totalChange: {
+              $sum: {
+                $subtract: [
+                  { $subtract: ["$productsTotal", { $ifNull: ["$discount", 0] }] },
+                  "$payment"
+                ]
+              }
+            }
+          }
+        }
+      ]),
+      Transaction.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(customerId), approved: true, createdAt: { $lt: start } } },
+        {
+          $group: {
+            _id: null,
+            totalChange: {
+              $sum: {
+                $cond: ["$paymentIn", { $multiply: ["$amount", -1] }, "$amount"]
+              }
+            }
+          }
+        }
+      ]),
+      ReturnBill.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(customerId), paymentMode: 'ADJUSTMENT', createdAt: { $lt: start } } },
+        { $group: { _id: null, totalChange: { $sum: "$totalAmount" } } }
+      ])
+    ]);
+
+    const openingBalance = (billsBefore[0]?.totalChange || 0) +
+      (txnsBefore[0]?.totalChange || 0) -
+      (returnsBefore[0]?.totalChange || 0);
+
+    // 2. Fetch specific records within range
+    const [bills, transactions, returnBills] = await Promise.all([
+      Bill.find({ customer: customerId, createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }),
+      Transaction.find({ customer: customerId, approved: true, createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 }),
+      ReturnBill.find({ customer: customerId, createdAt: { $gte: start, $lte: end } }).sort({ createdAt: 1 })
+    ]);
+
+    // Combine and sort range entries
+    let rangeHistory: any[] = [
+      ...bills.map(b => ({
+        type: 'BILL',
+        date: b.createdAt,
+        total: b.total,
+        productsTotal: b.productsTotal,
+        payment: b.payment,
+        discount: b.discount || 0,
+        description: `Bill #${b.id}`,
+        id: b._id,
+        refId: b.id
+      })),
+      ...transactions.map(t => ({
+        type: 'TRANSACTION',
+        date: t.createdAt,
+        amount: t.amount,
+        paymentIn: t.paymentIn,
+        description: t.purpose || (t.paymentIn ? 'Payment Received' : 'Cash Given'),
+        id: t._id,
+        refId: t.id
+      })),
+      ...returnBills.map(rb => ({
+        type: 'RETURN',
+        date: rb.createdAt,
+        totalAmount: rb.totalAmount,
+        paymentMode: rb.paymentMode,
+        description: `Return #${rb.id}`,
+        id: rb._id,
+        refId: rb.id
+      }))
+    ];
+
+    rangeHistory.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    let runningBalance = openingBalance;
+    const historyWithBalance: any[] = [];
+
+    for (const item of rangeHistory) {
+      const prevBalance = runningBalance;
+
+      if (item.type === 'BILL') {
+        const netProducts = (item.productsTotal || 0) - (item.discount || 0);
+        runningBalance += (netProducts - item.payment);
+      } else if (item.type === 'TRANSACTION') {
+        if (item.paymentIn) {
+          runningBalance -= item.amount;
+        } else {
+          runningBalance += item.amount;
+        }
+      } else if (item.type === 'RETURN') {
+        if (item.paymentMode === 'ADJUSTMENT') {
+          runningBalance -= item.totalAmount;
+        }
+      }
+
+      historyWithBalance.push({
+        ...item,
+        previousBalance: prevBalance,
+        newBalance: runningBalance
+      });
+    }
+
+    return ApiResponse(res, 200, true, "Customer history retrieved successfully", {
+      customer: {
+        name: customer.name,
+        phone: customer.phone,
+        currentOutstanding: customer.outstanding
+      },
+      openingBalance,
+      history: historyWithBalance,
+      closingBalance: runningBalance
+    });
+
+  } catch (error: any) {
+    console.error("Error fetching customer history:", error);
+    return ApiResponse(res, 500, false, "Internal Server Error", error.message);
+  }
+};
