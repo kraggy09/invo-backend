@@ -11,6 +11,8 @@ import moment from "moment-timezone";
 import { ApiError } from "../utils";
 import { EVENTS_MAP } from "../constant/redisMap";
 import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
+import { getNotificationRules } from "./notification.controller";
+import billEvents, { BILL_EVENTS } from "../events/bill.events";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
 export const createBill = async (req: Request, res: Response) => {
@@ -56,8 +58,11 @@ export const createBill = async (req: Request, res: Response) => {
       );
       const availableProducts = await Product.find(
         { _id: { $in: productIds } },
-        { stock: 1, costPrice: 1 } // only needed fields
+        { stock: 1, costPrice: 1, category: 1 } // only needed fields
       ).session(session);
+
+      const notificationRules = await getNotificationRules(customerId);
+      const matchingNotifications = new Map<string, { rule: any, items: any[] }>();
 
       const productMap = new Map<string, (typeof availableProducts)[0]>();
       availableProducts.forEach((prod: any) => {
@@ -106,6 +111,24 @@ export const createBill = async (req: Request, res: Response) => {
           type: productInput.type,
           total: productInput.total,
         });
+
+        // Single-pass notification check
+        const productCategory = (product.category || productInput.category)?.toLowerCase();
+        if (productCategory) {
+          for (const rule of notificationRules) {
+            const ruleCategory = (rule.category as any)?.name?.toLowerCase();
+            if (productCategory === ruleCategory) {
+              const ruleId = (rule as any)._id.toString();
+              if (!matchingNotifications.has(ruleId)) {
+                matchingNotifications.set(ruleId, { rule, items: [] });
+              }
+              matchingNotifications.get(ruleId)!.items.push({
+                productSnapshot: productInput,
+                quantity
+              });
+            }
+          }
+        }
       }
 
       // Execute stock update
@@ -204,6 +227,7 @@ export const createBill = async (req: Request, res: Response) => {
         transaction,
         billId: newBillId.value,
         transactionId: newTransactionCounter?.value,
+        matchingNotifications,
       };
     });
 
@@ -253,6 +277,12 @@ export const createBill = async (req: Request, res: Response) => {
       populatedBill._id,
       { paymentReceived: payment, itemsCount: populatedBill.items.length }
     );
+
+    // Emit event for background processing (notifications, etc.)
+    billEvents.emit(BILL_EVENTS.BILL_CREATED, {
+      bill: populatedBill,
+      matchingNotifications: (result as any).matchingNotifications
+    });
 
     return ApiResponse(res, 201, true, "Bill created successfully", {
       bill: { ...result, bill: populatedBill },

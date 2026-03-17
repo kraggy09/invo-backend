@@ -9,6 +9,7 @@ import categoryRouter from "./category.route";
 import adminRouter from "./admin.route";
 import journeyRouter from "./journey.route";
 import returnBillRouter from "./returnBill.route";
+import notificationRouter from "./notification.route";
 import { verifyToken } from "../services/token.service";
 
 const rootRouter = express.Router();
@@ -29,5 +30,6 @@ rootRouter.use("/transactions", transactionRouter);
 rootRouter.use("/categories", categoryRouter);
 rootRouter.use("/admin", adminRouter);
 rootRouter.use("/journey-logs", journeyRouter);
+rootRouter.use("/notifications", notificationRouter);
 
 export default rootRouter;
