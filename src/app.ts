@@ -5,9 +5,13 @@ import rootRouter from "./routes/index";
 
 const app: Express = express();
 
+app.set("trust proxy", 1);
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: [
+      "https://billing.kaifsk.com",
+      "http://localhost:5173"
+    ],
     credentials: true,
   })
 );

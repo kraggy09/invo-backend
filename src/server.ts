@@ -3,7 +3,7 @@ import http from "http";
 import configureSocketIO from "./config/socket.config";
 import setupSocketHandlers from "./sockets";
 import connection from "./db/dbConfig";
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
 const url = process.env.MONGO_URI as string;
 
 const server = http.createServer(app);

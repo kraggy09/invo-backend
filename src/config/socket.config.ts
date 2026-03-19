@@ -2,7 +2,6 @@ import { Server as SocketIOServer } from "socket.io";
 import { Server as HttpServer } from "http";
 import { pubClient, subClient } from "./redis.config";
 import { createAdapter } from "@socket.io/redis-adapter";
-import setupSocketHandlers from "../sockets/index";
 
 const configureSocketIO = async (server: HttpServer) => {
   try {
@@ -14,8 +13,6 @@ const configureSocketIO = async (server: HttpServer) => {
     });
     io.adapter(createAdapter(pubClient, subClient));
     console.log("🚀 Socket.IO is successfully initialized!");
-    // Socket handlers
-    setupSocketHandlers(io);
     return io;
   } catch (error) {
     console.error("❌ Error initializing Socket.IO:", error);
