@@ -144,7 +144,11 @@ export const getAdminData = async (req: Request, res: Response) => {
         {
           $addFields: {
             BillTotal: {
-              $sum: "$items.total", // Sum the total of all items in each document
+              $cond: {
+                if: { $gt: [{ $ifNull: ["$productsTotal", 0] }, 0] },
+                then: "$productsTotal",
+                else: { $sum: "$items.total" },
+              },
             },
           },
         },
@@ -159,11 +163,11 @@ export const getAdminData = async (req: Request, res: Response) => {
             },
           },
         },
-      ]);
+      ]).option({ allowDiskUse: true });
     };
 
     // Helper function for transaction aggregations
-    const aggregateTransactions = (start: Date, end: Date, taken = false) => {
+    const aggregateTransactions = (start: Date, end: Date) => {
       return Transaction.aggregate([
         {
           $match: {
@@ -171,7 +175,7 @@ export const getAdminData = async (req: Request, res: Response) => {
               $gte: start,
               $lte: end,
             },
-            taken: taken,
+            paymentIn: true,
           },
         },
         {
@@ -182,7 +186,7 @@ export const getAdminData = async (req: Request, res: Response) => {
             },
           },
         },
-      ]);
+      ]).option({ allowDiskUse: true });
     };
 
     // Current and Previous Sales Aggregations
@@ -215,16 +219,20 @@ export const getAdminData = async (req: Request, res: Response) => {
               date: "$date",
             },
           },
+          BillTotal: {
+            $cond: {
+              if: { $gt: [{ $ifNull: ["$productsTotal", 0] }, 0] },
+              then: "$productsTotal",
+              else: { $sum: "$items.total" },
+            },
+          },
         },
-      },
-      {
-        $unwind: "$items",
       },
       {
         $group: {
           _id: "$dateOnly",
           totalAmount: {
-            $sum: "$items.total",
+            $sum: "$BillTotal",
           },
         },
       },
@@ -233,7 +241,7 @@ export const getAdminData = async (req: Request, res: Response) => {
           _id: 1,
         },
       },
-    ]);
+    ]).option({ allowDiskUse: true });
 
     // Daily transactions
     let trans = await Transaction.aggregate([
@@ -243,7 +251,7 @@ export const getAdminData = async (req: Request, res: Response) => {
             $gte: startCurrent,
             $lte: endCurrent,
           },
-          taken: false,
+          paymentIn: true,
         },
       },
       {
@@ -260,7 +268,7 @@ export const getAdminData = async (req: Request, res: Response) => {
           _id: 1,
         },
       },
-    ]);
+    ]).option({ allowDiskUse: true });
     let outstanding = await Customer.aggregate([
       {
         $group: {
@@ -270,7 +278,7 @@ export const getAdminData = async (req: Request, res: Response) => {
           },
         },
       },
-    ]);
+    ]).option({ allowDiskUse: true });
 
     // Payment Status Aggregation
     const paymentStatus = await Bill.aggregate([
@@ -289,44 +297,105 @@ export const getAdminData = async (req: Request, res: Response) => {
           _id: 0
         }
       }
-    ]);
+    ]).option({ allowDiskUse: true });
 
-    // Top Products
-    const topProducts = await Bill.aggregate([
+    // Optimized Product Statistics Aggregation
+    const productStatsAgg = await Bill.aggregate([
       {
         $match: {
-          createdAt: { $gte: startCurrent, $lte: endCurrent }
+          $or: [
+            { createdAt: { $gte: startCurrent, $lte: endCurrent } },
+            { createdAt: { $gte: startPrevious, $lte: endPrevious } }
+          ]
         }
       },
       { $unwind: "$items" },
       {
+        $group: {
+          _id: "$items.product",
+          currentRevenue: {
+            $sum: {
+              $cond: [
+                { $and: [{ $gte: ["$createdAt", startCurrent] }, { $lte: ["$createdAt", endCurrent] }] },
+                "$items.total",
+                0
+              ]
+            }
+          },
+          currentSales: {
+            $sum: {
+              $cond: [
+                { $and: [{ $gte: ["$createdAt", startCurrent] }, { $lte: ["$createdAt", endCurrent] }] },
+                "$items.quantity",
+                0
+              ]
+            }
+          },
+          previousRevenue: {
+            $sum: {
+              $cond: [
+                { $and: [{ $gte: ["$createdAt", startPrevious] }, { $lte: ["$createdAt", endPrevious] }] },
+                "$items.total",
+                0
+              ]
+            }
+          }
+        }
+      },
+      {
         $lookup: {
           from: "products",
-          localField: "items.product",
+          localField: "_id",
           foreignField: "_id",
           as: "productDoc"
         }
       },
       { $unwind: { path: "$productDoc", preserveNullAndEmptyArrays: true } },
       {
-        $group: {
-          _id: { $ifNull: ["$productDoc.name", "Unknown Product"] },
-          sales: { $sum: "$items.quantity" },
-          revenue: { $sum: "$items.total" }
+        $project: {
+          name: { $ifNull: ["$productDoc.name", "Unknown Product"] },
+          sales: "$currentSales",
+          revenue: "$currentRevenue",
+          change: {
+            $let: {
+              vars: {
+                diff: { $subtract: ["$currentRevenue", "$previousRevenue"] }
+              },
+              in: {
+                $cond: {
+                  if: { $eq: ["$previousRevenue", 0] },
+                  then: { $cond: [{ $gt: ["$currentRevenue", 0] }, "+100%", "0%"] },
+                  else: {
+                    $concat: [
+                      { $cond: [{ $gte: ["$$diff", 0] }, "+", ""] },
+                      { $toString: { $round: [{ $multiply: [{ $divide: ["$$diff", "$previousRevenue"] }, 100] }, 1] } },
+                      "%"
+                    ]
+                  }
+                }
+              }
+            }
+          }
         }
       },
-      { $sort: { revenue: -1 } },
-      { $limit: 3 },
       {
-        $project: {
-          name: "$_id",
-          sales: 1,
-          revenue: 1,
-          change: { $literal: "+0%" }, // Placeholder for change
-          _id: 0
+        $facet: {
+          topProducts: [
+            { $match: { revenue: { $gt: 0 } } },
+            { $sort: { revenue: -1 } },
+            { $limit: 10 }
+          ],
+          lowSellingProducts: [
+            { $match: { revenue: { $gt: 0 } } },
+            { $sort: { revenue: 1 } },
+            { $limit: 5 }
+          ]
         }
       }
-    ]);
+    ]).option({ allowDiskUse: true });
+
+    const topProducts = productStatsAgg[0].topProducts;
+    const lowSellingProducts = productStatsAgg[0].lowSellingProducts;
 
     // Recent Customers
     const recentBills = await Bill.find()
@@ -353,7 +422,7 @@ export const getAdminData = async (req: Request, res: Response) => {
       { $match: { createdAt: { $gte: startCurrent, $lte: endCurrent } } },
       { $group: { _id: "$customer" } },
       { $count: "activeCount" }
-    ]);
+    ]).option({ allowDiskUse: true });
     const activeCustomers = activeCustomersAgg.length > 0 ? activeCustomersAgg[0].activeCount : 0;
 
     const quickStats = {
@@ -367,17 +436,31 @@ export const getAdminData = async (req: Request, res: Response) => {
     const todayBills = await Bill.aggregate([
       { $match: { createdAt: { $gte: todayStart, $lte: todayEnd } } },
       {
+        $addFields: {
+          calculatedTotal: {
+            $cond: {
+              if: { $gt: [{ $ifNull: ["$productsTotal", 0] }, 0] },
+              then: "$productsTotal",
+              else: { $sum: "$items.total" },
+            },
+          },
+        },
+      },
+      {
         $group: {
           _id: { $hour: "$createdAt" },
-          totalAmount: { $sum: "$total" },
+          totalAmount: { $sum: "$calculatedTotal" },
           count: { $sum: 1 }
         }
       },
       { $sort: { totalAmount: -1 } }
-    ]);
+    ]).option({ allowDiskUse: true });
 
     const todaySales = todayBills.reduce((acc, curr) => acc + curr.totalAmount, 0);
-    const todayTransactions = todayBills.reduce((acc, curr) => acc + curr.count, 0);
+    const todayTransactions = await Transaction.countDocuments({
+      createdAt: { $gte: todayStart, $lte: todayEnd },
+      paymentIn: true,
+    });
     const averageTicket = todayTransactions > 0 ? Math.round(todaySales / todayTransactions) : 0;
 
     let peakHour = "N/A";
@@ -407,7 +490,7 @@ export const getAdminData = async (req: Request, res: Response) => {
       },
       { $sort: { revenue: -1 } },
       { $limit: 3 }
-    ]);
+    ]).option({ allowDiskUse: true });
 
     const topProductsToday = topProductTodayAgg.map(p => ({
       name: p._id,
@@ -434,6 +517,7 @@ export const getAdminData = async (req: Request, res: Response) => {
       outstanding: outstanding.length > 0 ? outstanding[0].cash : 0,
       paymentStatus,
       topProducts,
+      lowSellingProducts,
       recentCustomers,
       quickStats,
       dailySummary
@@ -586,7 +670,11 @@ export const getCustomerData = async (req: Request, res: Response) => {
       {
         $addFields: {
           BillTotal: {
-            $sum: "$items.total", // Sum the total of all items in each document
+            $cond: {
+              if: { $gt: [{ $ifNull: ["$productsTotal", 0] }, 0] },
+              then: "$productsTotal",
+              else: { $sum: "$items.total" },
+            },
           },
         },
       },
@@ -601,11 +689,11 @@ export const getCustomerData = async (req: Request, res: Response) => {
           },
         },
       },
-    ]);
+    ]).option({ allowDiskUse: true });
   };
 
   // Helper function for transaction aggregations
-  const aggregateTransactions = (start: Date, end: Date, taken = false) => {
+  const aggregateTransactions = (start: Date, end: Date) => {
     return Transaction.aggregate([
       {
         $match: {
@@ -614,7 +702,7 @@ export const getCustomerData = async (req: Request, res: Response) => {
             $gte: start,
             $lte: end,
           },
-          taken: taken,
+          paymentIn: true,
         },
       },
       {
@@ -625,7 +713,7 @@ export const getCustomerData = async (req: Request, res: Response) => {
           },
         },
       },
-    ]);
+    ]).option({ allowDiskUse: true });
   };
 
   // Current and Previous Sales Aggregations
@@ -659,16 +747,20 @@ export const getCustomerData = async (req: Request, res: Response) => {
             date: "$date",
           },
         },
+        BillTotal: {
+          $cond: {
+            if: { $gt: [{ $ifNull: ["$productsTotal", 0] }, 0] },
+            then: "$productsTotal",
+            else: { $sum: "$items.total" },
+          },
+        },
       },
-    },
-    {
-      $unwind: "$items",
     },
     {
       $group: {
         _id: "$dateOnly",
         totalAmount: {
-          $sum: "$items.total",
+          $sum: "$BillTotal",
         },
       },
     },
@@ -677,7 +769,7 @@ export const getCustomerData = async (req: Request, res: Response) => {
         _id: 1,
       },
     },
-  ]);
+  ]).option({ allowDiskUse: true });
 
   // Daily transactions
   let trans = await Transaction.aggregate([
@@ -688,7 +780,7 @@ export const getCustomerData = async (req: Request, res: Response) => {
           $gte: startCurrent,
           $lte: endCurrent,
         },
-        taken: false,
+        paymentIn: true,
       },
     },
     {
@@ -705,7 +797,7 @@ export const getCustomerData = async (req: Request, res: Response) => {
         _id: 1,
       },
     },
-  ]);
+  ]).option({ allowDiskUse: true });
 
   console.log({
     totalCurrSales,

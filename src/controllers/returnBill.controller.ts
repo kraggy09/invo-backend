@@ -297,7 +297,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
 
 export const getAllReturnBills = async (req: Request, res: Response) => {
     try {
-        const { startDate, endDate } = req.query;
+        const { startDate, endDate, page = 1, limit = 10 } = req.query;
 
         let query: any = {};
         if (startDate && endDate) {
@@ -308,16 +308,80 @@ export const getAllReturnBills = async (req: Request, res: Response) => {
             query.createdAt = { $gte: start, $lte: end };
         }
 
-        const returnBills = await ReturnBill.find(query)
-            .populate("customer")
-            .populate("createdBy", "name username")
-            .populate("items.product")
-            .sort({ createdAt: -1 });
+        const skip = (Number(page) - 1) * Number(limit);
 
-        return ApiResponse(res, 200, true, "Return bills fetched", { returnBills });
+        const [returnBills, total] = await Promise.all([
+            ReturnBill.find(query)
+                .populate("customer", "name phone")
+                .populate("createdBy", "name username")
+                .populate("items.product", "name")
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(Number(limit))
+                .lean(),
+            ReturnBill.countDocuments(query),
+        ]);
+
+        return ApiResponse(res, 200, true, "Return bills fetched", {
+            returnBills,
+            total,
+            page: Number(page),
+            limit: Number(limit),
+        });
     } catch (error: any) {
         console.error(error);
         return ApiResponse(res, 500, false, "Server error", error.message);
+    }
+};
+
+export const getReturnBillsSummary = async (req: Request, res: Response) => {
+    try {
+        const { startDate, endDate } = req.query;
+
+        if (!startDate || !endDate) {
+            return ApiResponse(
+                res,
+                400,
+                false,
+                "Both startDate and endDate are required"
+            );
+        }
+
+        const start = new Date(startDate as string);
+        const end = new Date(endDate as string);
+
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+            return ApiResponse(res, 400, false, "Invalid date format");
+        }
+
+        start.setHours(0, 0, 0, 0);
+        end.setHours(23, 59, 59, 999);
+
+        const returnStats = await ReturnBill.aggregate([
+            {
+                $match: {
+                    createdAt: { $gte: start, $lte: end },
+                },
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalReturnAmount: { $sum: "$totalAmount" },
+                    totalProductsAmount: { $sum: "$productsTotal" },
+                    count: { $sum: 1 },
+                },
+            },
+        ]);
+
+        const result = {
+            totalReturnAmount: returnStats[0]?.totalReturnAmount || 0,
+            totalProductsAmount: returnStats[0]?.totalProductsAmount || 0,
+            returnCount: returnStats[0]?.count || 0,
+        };
+
+        return ApiResponse(res, 200, true, "Return bills summary calculated", result);
+    } catch (error: any) {
+        return ApiResponse(res, 500, false, error.message || "Server Error");
     }
 };
 

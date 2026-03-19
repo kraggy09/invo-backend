@@ -349,85 +349,72 @@ export async function getBillsByProductNameAndDate(
   req: Request,
   res: Response
 ) {
-  const { product, startDate, endDate } = req.body;
+  const { product, startDate, endDate, page = 1, limit = 20 } = req.body;
 
   const barcode = product.barcode.map((code: any) => parseInt(code));
 
   try {
     const startMoment = moment(startDate).startOf("day").tz(IST);
     const endMoment = moment(endDate).endOf("day").tz(IST);
+    const skip = (Number(page) - 1) * Number(limit);
+    const limitNum = Number(limit);
 
-    const result = await Bill.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: startMoment.toDate(), $lte: endMoment.toDate() },
-        },
-      },
-      {
-        $unwind: "$items",
-      },
-      {
-        $lookup: {
-          from: "products",
-          localField: "items.product",
-          foreignField: "_id",
-          as: "productDetails",
-        },
-      },
-      {
-        $unwind: "$productDetails",
-      },
-      {
-        $match: {
-          "productDetails.barcode": { $in: barcode },
-        },
-      },
+    // Look up the exact product ID so we can do a pure DB find without lookups
+    const matchingProducts = await mongoose.model("Product").find({ barcode: { $in: barcode } }).select("_id").lean();
+    const productIds = matchingProducts.map((p: any) => p._id);
 
-      {
-        $lookup: {
-          from: "users",
-          localField: "createdBy",
-          foreignField: "_id",
-          as: "createdByDetails",
-        },
-      },
-      {
-        $lookup: {
-          from: "customers",
-          localField: "customer",
-          foreignField: "_id",
-          as: "customerDetails",
-        },
-      },
-      {
-        $addFields: {
-          createdBy: { $arrayElemAt: ["$createdByDetails", 0] },
-          customer: { $arrayElemAt: ["$customerDetails", 0] },
-        },
-      },
-      {
-        $group: {
-          _id: "$_id",
-          date: { $first: "$date" },
-          createdAt: { $first: "$createdAt" },
-          items: { $push: "$items" },
-          expires: { $first: "$expires" },
-          total: { $first: "$total" },
-          payment: { $first: "$payment" },
-          discount: { $first: "$discount" },
-          createdBy: { $first: "$createdBy" },
-          customer: { $first: "$customer" },
-        },
-      },
-      {
-        $sort: {
-          createdAt: -1,
-        },
-      },
+    const matchQuery = {
+      createdAt: { $gte: startMoment.toDate(), $lte: endMoment.toDate() },
+      "items.product": { $in: productIds }
+    };
+
+    // 1) Find the actual paginated bills and populate using fast DB native routines
+    const [billsData, totalInstances] = await Promise.all([
+      Bill.find(matchQuery)
+        .populate("customer", "name phone")
+        .populate("createdBy", "name username")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Bill.countDocuments(matchQuery)
     ]);
 
+    // Format the bills items array so it ONLY contains the matching products, 
+    // exactly like the previous $unwind and $match pipeline did.
+    const bills = billsData.map((bill: any) => ({
+      ...bill,
+      items: bill.items.filter((item: any) =>
+        productIds.some((pid: any) => String(pid) === String(item.product))
+      )
+    }));
+
+    // 2) Compute the overall total quantity/revenue quickly without deep groupings
+    const summaryAgg = await Bill.aggregate([
+      { $match: matchQuery },
+      { $unwind: "$items" },
+      { $match: { "items.product": { $in: productIds } } },
+      {
+        $group: {
+          _id: null,
+          totalQuantity: { $sum: "$items.quantity" },
+          totalRevenue: { $sum: "$items.total" }
+        }
+      }
+    ]);
+
+    const summary = {
+      totalInstances,
+      totalQuantity: summaryAgg[0]?.totalQuantity || 0,
+      totalRevenue: summaryAgg[0]?.totalRevenue || 0
+    };
+
     return ApiResponse(res, 200, true, "Recieved successfully", {
-      bills: result,
+      bills,
+      total: totalInstances,
+      summary,
+      page: Number(page),
+      limit: limitNum
     });
   } catch (error: any) {
     console.error(error);
@@ -437,7 +424,81 @@ export async function getBillsByProductNameAndDate(
 
 export const getAllBillsInDateRange = async (req: Request, res: Response) => {
   try {
-    const { startDate, endDate, offset = 0, limit = 10 } = req.query;
+    const { startDate, endDate, page = 1, limit = 10, search } = req.query;
+
+    if (!startDate || !endDate) {
+      return ApiResponse(res, 400, false, "Both startDate and endDate are required");
+    }
+
+    const start = new Date(startDate as string);
+    const end = new Date(endDate as string);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return ApiResponse(res, 400, false, "Invalid date format");
+    }
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    const skip = (Number(page) - 1) * Number(limit);
+
+    let matchQuery: any = {
+      createdAt: {
+        $gte: start,
+        $lte: end,
+      },
+    };
+
+    if (search) {
+      const searchStr = String(search).trim();
+      const numSearch = Number(searchStr);
+
+      const customerMatch = await Customer.find({
+        $or: [
+          { name: { $regex: searchStr, $options: "i" } },
+          { phone: { $regex: searchStr, $options: "i" } }
+        ]
+      }).select("_id").lean();
+
+      const customerIds = customerMatch.map(c => c._id);
+
+      const orConditions: any[] = [
+        { customer: { $in: customerIds } }
+      ];
+
+      if (!isNaN(numSearch)) {
+        orConditions.push({ id: numSearch });
+      }
+
+      matchQuery.$or = orConditions;
+    }
+
+    const [bills, total] = await Promise.all([
+      Bill.find(matchQuery)
+        .populate("customer", "name phone")
+        .populate("createdBy", "name username")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      Bill.countDocuments(matchQuery),
+    ]);
+
+    return ApiResponse(res, 200, true, "Bills found", {
+      bills,
+      total,
+      page: Number(page),
+      limit: Number(limit),
+    });
+  } catch (error: any) {
+    console.log(error, "This is the error you need to check");
+    return ApiResponse(res, 500, false, "Server error", error.message);
+  }
+};
+
+export const getBillsSummary = async (req: Request, res: Response) => {
+  try {
+    const { startDate, endDate } = req.query;
 
     if (!startDate || !endDate) {
       return ApiResponse(
@@ -451,7 +512,6 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
     const start = new Date(startDate as string);
     const end = new Date(endDate as string);
 
-    // Check if the dates are valid
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
       return ApiResponse(res, 400, false, "Invalid date format");
     }
@@ -459,31 +519,94 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
     start.setHours(0, 0, 0, 0);
     end.setHours(23, 59, 59, 999);
 
-    // Pagination logic (offset, limit)
-    const bills = await Bill.find({
-      createdAt: {
-        $gte: start,
-        $lte: end,
-      },
-    })
-      .populate("items.product")
-      .populate("customer")
-      .populate("createdBy", "name username");
+    const [billStats, transactionStats, peakHourAgg] = await Promise.all([
+      Bill.aggregate([
+        {
+          $match: {
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $unwind: "$items",
+        },
+        {
+          $group: {
+            _id: null,
+            totalBillAmount: { $sum: "$items.total" },
+            totalInvestment: {
+              $sum: {
+                $multiply: [
+                  "$items.quantity",
+                  { $ifNull: ["$items.costPrice", 0] },
+                ],
+              },
+            },
+          },
+        },
+      ]).option({ allowDiskUse: true }),
+      Transaction.aggregate([
+        {
+          $match: {
+            createdAt: { $gte: start, $lte: end },
+            approved: true,
+          },
+        },
+        {
+          $group: {
+            _id: "$paymentIn",
+            totalAmount: { $sum: "$amount" },
+          },
+        },
+      ]).option({ allowDiskUse: true }),
+      Bill.aggregate([
+        {
+          $match: {
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $group: {
+            _id: { $hour: "$createdAt" },
+            count: { $sum: 1 },
+          },
+        },
+        {
+          $sort: { count: -1 },
+        },
+        {
+          $limit: 1,
+        },
+      ]).option({ allowDiskUse: true }),
+    ]);
 
-    if (bills.length > 0) {
-      return ApiResponse(res, 200, true, "Bills found", { bills });
-    } else {
-      return ApiResponse(
-        res,
-        200,
-        true,
-        "No bills found for the given date range",
-        { bills: [] }
-      );
+    const result = {
+      totalBillAmount: billStats[0]?.totalBillAmount || 0,
+      totalInvestment: billStats[0]?.totalInvestment || 0,
+      profit:
+        (billStats[0]?.totalBillAmount || 0) -
+        (billStats[0]?.totalInvestment || 0),
+      totalPaymentIn: 0,
+      totalPaymentOut: 0,
+      peakHour: "N/A",
+    };
+
+    transactionStats.forEach((t) => {
+      if (t._id === true) {
+        result.totalPaymentIn = t.totalAmount;
+      } else {
+        result.totalPaymentOut = t.totalAmount;
+      }
+    });
+
+    if (peakHourAgg.length > 0) {
+      const hour = peakHourAgg[0]._id;
+      const startHour = moment().hour(hour).minute(0).format("hh A");
+      const endHour = moment().hour(hour + 1).minute(0).format("hh A");
+      result.peakHour = `${startHour} - ${endHour}`;
     }
-  } catch (error: any) {
-    console.log(error, "This is the error you need to check");
 
-    return ApiResponse(res, 500, false, "Server error", error.message);
+    return ApiResponse(res, 200, true, "Summary calculated", result);
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message || "Server Error");
   }
 };

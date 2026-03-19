@@ -7,12 +7,14 @@ import {
   getLatestTransactionId,
   rejectTransaction,
   getAllTransactionsInDateRange,
-  getSingleTransaction
+  getSingleTransaction,
+  getTransactionsSummary
 } from "../controllers/transaction.controller";
 import { isAllowed } from "../services/token.service";
 const transactionRouter = express.Router();
 
 transactionRouter.route("/").post(createNewTransaction).get(getAllTransactionsInDateRange);
+transactionRouter.route("/summary").get(getTransactionsSummary);
 transactionRouter.route("/payments").post(createNewPayment);
 transactionRouter.route("/approvals").get(getAllTransactions);
 transactionRouter.route("/:id/approve").post(isAllowed(["SUPER_ADMIN", "CREATOR"]), approveTransaction);

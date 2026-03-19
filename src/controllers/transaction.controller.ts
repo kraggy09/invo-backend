@@ -447,7 +447,7 @@ export const getAllTransactionsInDateRange = async (
   req: Request,
   res: Response
 ) => {
-  const { startDate, endDate } = req.query;
+  const { startDate, endDate, page = 1, limit = 10, paymentIn } = req.query;
 
   if (!startDate || !endDate) {
     return ApiResponse(
@@ -468,29 +468,98 @@ export const getAllTransactionsInDateRange = async (
     start.setHours(0, 0, 0, 0);
     end.setHours(23, 59, 59, 999);
 
-    const transactions = await Transaction.find({
+    const query: any = {
       createdAt: {
         $gte: start,
         $lte: end,
       },
-      approved: true
-    })
-      .populate("customer", "name phone")
-      .populate("approvedBy", "name username");
+      approved: true,
+    };
 
-    if (transactions.length === 0) {
-      return ApiResponse(
-        res,
-        200,
-        true,
-        "No transactions found in this range",
-        { transactions: [] }
-      );
+    if (paymentIn !== undefined) {
+      query.paymentIn = paymentIn === "true";
     }
+
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const [transactions, total] = await Promise.all([
+      Transaction.find(query)
+        .populate("customer", "name phone")
+        .populate("approvedBy", "name username")
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      Transaction.countDocuments(query),
+    ]);
 
     return ApiResponse(res, 200, true, "Transactions found successfully", {
       transactions,
+      total,
+      page: Number(page),
+      limit: Number(limit),
     });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message || "Server Error");
+  }
+};
+
+export const getTransactionsSummary = async (req: Request, res: Response) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return ApiResponse(
+        res,
+        400,
+        false,
+        "Please provide both startDate and endDate"
+      );
+    }
+
+    const start = new Date(startDate as string);
+    const end = new Date(endDate as string);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return ApiResponse(res, 400, false, "Invalid date format");
+    }
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    const transactionStats = await Transaction.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: start, $lte: end },
+          approved: true,
+        },
+      },
+      {
+        $group: {
+          _id: "$paymentIn",
+          totalAmount: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const result = {
+      totalPaymentIn: 0,
+      totalPaymentOut: 0,
+      paymentInCount: 0,
+      paymentOutCount: 0,
+    };
+
+    transactionStats.forEach((t) => {
+      if (t._id === true) {
+        result.totalPaymentIn = t.totalAmount;
+        result.paymentInCount = t.count;
+      } else {
+        result.totalPaymentOut = t.totalAmount;
+        result.paymentOutCount = t.count;
+      }
+    });
+
+    return ApiResponse(res, 200, true, "Transactions summary calculated", result);
   } catch (error: any) {
     return ApiResponse(res, 500, false, error.message || "Server Error");
   }

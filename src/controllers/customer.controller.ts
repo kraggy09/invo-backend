@@ -8,6 +8,7 @@ import { EVENTS_MAP } from "../constant/redisMap";
 import CustomerJourney from "../models/customerJourney.model";
 import mongoose from "mongoose";
 import { addJourneyLog } from "../services/logger.service";
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 
 export const createNewCustomer = async (req: Request, res: Response) => {
   try {
@@ -69,41 +70,73 @@ export const getAllCustomers = async (req: Request, res: Response) => {
   }
 };
 
-export const getSingleCustomer = async (req: Request, res: Response) => {
+export const getSingleCustomer = async (req: AuthenticatedRequest, res: Response) => {
   const customerId = req.params.id; // Access the customer ID from the route parameter
 
+  const user = req.user
+  if (!user) {
+    return ApiResponse(res, 404, false, "Unable to find the User")
+  }
+
+  const userRoles = user.roles
+  const hasJourneyLogsAccess = userRoles?.some((role) => ["SUPER_ADMIN", "ADMIN", "CREATOR"].includes(role))
   try {
     const customer = await Customer.findById(customerId);
     if (!customer) {
       return ApiResponse(res, 404, false, "Customer not found");
     }
 
-    let bills = await Bill.find({ customer: customerId })
-      .populate("createdBy", "name email")
-      .sort({
-        createdAt: -1,
-      });
+    // Only fetch RECENT records for the initial load to prevent crashes
+    const recentLimit = 20;
 
-    let returnBills = await ReturnBill.find({ customer: customerId })
+    const bills = await Bill.find({ customer: customerId })
       .populate("createdBy", "name email")
-      .sort({
-        createdAt: -1,
-      });
+      .sort({ createdAt: -1 })
+      .limit(recentLimit)
+      .lean();
 
-    let transactions = await Transaction.find({
+    const returnBills = await ReturnBill.find({ customer: customerId })
+      .populate("createdBy", "name email")
+      .sort({ createdAt: -1 })
+      .limit(recentLimit)
+      .lean();
+
+    const transactions = await Transaction.find({
       customer: customerId,
       approved: true,
-    }).sort({
-      createdAt: -1,
-    });
+    })
+      .sort({ createdAt: -1 })
+      .limit(recentLimit)
+      .lean();
 
-    let journeys = await CustomerJourney.find({ customer: customerId })
-      .populate("user", "name username")
-      .sort({
-        createdAt: -1,
-      });
+    let journeys: any[] = [];
+    if (hasJourneyLogsAccess) {
+      journeys = await CustomerJourney.find({ customer: customerId })
+        .populate("user", "name username")
+        .sort({ createdAt: -1 })
+        .limit(recentLimit)
+        .lean();
+    }
 
-    const newCustomer = { ...customer.toObject(), bills, returnBills, transactions, journeys };
+    const totalBills = await Bill.countDocuments({ customer: customerId });
+    const totalReturnBills = await ReturnBill.countDocuments({ customer: customerId });
+    const totalTransactions = await Transaction.countDocuments({ customer: customerId, approved: true });
+    let totalJourneys = 0;
+    if (hasJourneyLogsAccess) {
+      totalJourneys = await CustomerJourney.countDocuments({ customer: customerId });
+    }
+
+    const newCustomer = {
+      ...customer.toObject(),
+      bills,
+      returnBills,
+      transactions,
+      journeys,
+      totalBills,
+      totalReturnBills,
+      totalTransactions,
+      totalJourneys,
+    };
 
     return ApiResponse(res, 200, true, "Customer found successfully", {
       customer: newCustomer,
@@ -391,5 +424,108 @@ export const getCustomerHistory = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("Error fetching customer history:", error);
     return ApiResponse(res, 500, false, "Internal Server Error", error.message);
+  }
+};
+export const getCustomerBills = async (req: Request, res: Response) => {
+  try {
+    const customerId = req.params.id;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 15;
+    const skip = (page - 1) * limit;
+
+    const bills = await Bill.find({ customer: customerId })
+      .populate("createdBy", "name email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const total = await Bill.countDocuments({ customer: customerId });
+
+    return ApiResponse(res, 200, true, "Customer bills retrieved", {
+      bills,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+    });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message);
+  }
+};
+
+export const getCustomerTransactions = async (req: Request, res: Response) => {
+  try {
+    const customerId = req.params.id;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 15;
+    const skip = (page - 1) * limit;
+
+    const transactions = await Transaction.find({ customer: customerId, approved: true })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const total = await Transaction.countDocuments({ customer: customerId, approved: true });
+
+    return ApiResponse(res, 200, true, "Customer transactions retrieved", {
+      transactions,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+    });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message);
+  }
+};
+
+export const getCustomerReturns = async (req: Request, res: Response) => {
+  try {
+    const customerId = req.params.id;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 15;
+    const skip = (page - 1) * limit;
+
+    const returnBills = await ReturnBill.find({ customer: customerId })
+      .populate("createdBy", "name email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const total = await ReturnBill.countDocuments({ customer: customerId });
+
+    return ApiResponse(res, 200, true, "Customer return bills retrieved", {
+      returnBills,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+    });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message);
+  }
+};
+
+export const getCustomerJourneys = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const customerId = req.params.id;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 15;
+    const skip = (page - 1) * limit;
+
+    const user = req.user;
+    if (!user || !user.roles?.some((role) => ["SUPER_ADMIN", "ADMIN", "CREATOR"].includes(role))) {
+      return ApiResponse(res, 403, false, "Unauthorized access to journey logs");
+    }
+
+    const journeys = await CustomerJourney.find({ customer: customerId })
+      .populate("user", "name username")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const total = await CustomerJourney.countDocuments({ customer: customerId });
+
+    return ApiResponse(res, 200, true, "Customer journeys retrieved", {
+      journeys,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+    });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message);
   }
 };
