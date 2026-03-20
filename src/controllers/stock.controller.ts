@@ -111,6 +111,7 @@ export const updateInventoryRequest = async (
       const pendingStocks = await Stock.find({
         product: { $in: uniqueIds },
         approved: false,
+        rejected: false,
       })
         .select("product")
         .lean()
