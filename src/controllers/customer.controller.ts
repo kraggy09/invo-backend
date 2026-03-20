@@ -9,6 +9,9 @@ import CustomerJourney from "../models/customerJourney.model";
 import mongoose from "mongoose";
 import { addJourneyLog } from "../services/logger.service";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import moment from "moment-timezone";
+
+const IST = "Asia/Kolkata";
 
 export const createNewCustomer = async (req: Request, res: Response) => {
   try {
@@ -157,12 +160,8 @@ export const getCustomerAnalytics = async (req: Request, res: Response) => {
       days = 7;
     }
 
-    const endDate = new Date();
-    endDate.setHours(23, 59, 59, 999);
-
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days + 1);
-    startDate.setHours(0, 0, 0, 0);
+    const endDate = moment.tz(IST).endOf("day").toDate();
+    const startDate = moment.tz(IST).subtract(days - 1, "days").startOf("day").toDate();
 
     // 1. Fetch Bills for Sales & Profit
     const billsAgg = await Bill.aggregate([
@@ -241,9 +240,8 @@ export const getCustomerAnalytics = async (req: Request, res: Response) => {
 
     // Fill the array with the requested days chronologically
     for (let i = 0; i < days; i++) {
-      const d = new Date(startDate);
-      d.setDate(d.getDate() + i);
-      const dateStr = d.toISOString().split("T")[0];
+      const d = moment.tz(startDate, IST).add(i, "days");
+      const dateStr = d.format("YYYY-MM-DD");
 
       const billMatch = billsAgg.find(b => b.date === dateStr);
       const txMatch = txAgg.find(t => t.date === dateStr);
@@ -288,10 +286,8 @@ export const getCustomerHistory = async (req: Request, res: Response) => {
       return ApiResponse(res, 400, false, "Please provide both startDate and endDate");
     }
 
-    const start = new Date(startDate as string);
-    const end = new Date(endDate as string);
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
+    const start = moment.tz(startDate as string, IST).startOf("day").toDate();
+    const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
     const customer = await Customer.findById(customerId);
     if (!customer) {

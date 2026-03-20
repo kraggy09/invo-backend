@@ -8,6 +8,9 @@ import Customer from "../models/customer.model";
 import mongoose from "mongoose";
 import ACL from "../models/acl.model";
 import ACLUser from "../models/aclUser.model";
+import moment from "moment-timezone";
+
+const IST = "Asia/Kolkata";
 
 export const addUserToCompany = async (req: Request, res: Response) => {
   const session = await mongoose.startSession();
@@ -109,26 +112,14 @@ export const getAdminData = async (req: Request, res: Response) => {
     let { days } = req.body;
 
     // Define date ranges
-    const startCurrent = new Date(date.getTime() - days * 24 * 60 * 60 * 1000);
-    startCurrent.setHours(0, 0, 0, 0);
+    const startCurrent = moment.tz(IST).subtract(days, "days").startOf("day").toDate();
+    const endCurrent = moment.tz(IST).subtract(1, "days").endOf("day").toDate();
 
-    const endCurrent = new Date(date.getTime() - 1 * 24 * 60 * 60 * 1000);
-    endCurrent.setHours(23, 59, 59, 999);
+    const startPrevious = moment.tz(IST).subtract(days * 2, "days").startOf("day").toDate();
+    const endPrevious = moment.tz(IST).subtract(days + 1, "days").endOf("day").toDate();
 
-    const startPrevious = new Date(
-      date.getTime() - days * 2 * 24 * 60 * 60 * 1000
-    );
-    startPrevious.setHours(0, 0, 0, 0);
-
-    const endPrevious = new Date(
-      date.getTime() - (days + 1) * 24 * 60 * 60 * 1000
-    );
-    endPrevious.setHours(23, 59, 59, 999);
-
-    const todayStart = new Date(date);
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date(date);
-    todayEnd.setHours(23, 59, 59, 999);
+    const todayStart = moment.tz(IST).startOf("day").toDate();
+    const todayEnd = moment.tz(IST).endOf("day").toDate();
 
     // Helper function for aggregations
     const aggregateSales = (start: Date, end: Date) => {
@@ -633,22 +624,10 @@ export const deleteUser = async (req: Request, res: Response) => {
 export const getCustomerData = async (req: Request, res: Response) => {
   let { days, customerId } = req.body;
   customerId = new mongoose.Types.ObjectId(customerId);
-  let date = new Date();
-  const startCurrent = new Date(date.getTime() - days * 24 * 60 * 60 * 1000);
-  startCurrent.setHours(0, 0, 0, 0);
-
-  const endCurrent = new Date(date.getTime() - 1 * 24 * 60 * 60 * 1000);
-  endCurrent.setHours(23, 59, 59, 999);
-
-  const startPrevious = new Date(
-    date.getTime() - days * 2 * 24 * 60 * 60 * 1000
-  );
-  startPrevious.setHours(0, 0, 0, 0);
-
-  const endPrevious = new Date(
-    date.getTime() - (days + 1) * 24 * 60 * 60 * 1000
-  );
-  endPrevious.setHours(23, 59, 59, 999);
+  const startCurrent = moment.tz(IST).subtract(days, "days").startOf("day").toDate();
+  const endCurrent = moment.tz(IST).subtract(1, "days").endOf("day").toDate();
+  const startPrevious = moment.tz(IST).subtract(days * 2, "days").startOf("day").toDate();
+  const endPrevious = moment.tz(IST).subtract(days + 1, "days").endOf("day").toDate();
 
   let foundCustomer = await Customer.findOne({ _id: customerId });
 

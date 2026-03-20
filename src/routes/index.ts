@@ -11,10 +11,17 @@ import journeyRouter from "./journey.route";
 import returnBillRouter from "./returnBill.route";
 import notificationRouter from "./notification.route";
 import { verifyToken } from "../services/token.service";
+import { Request, Response } from "express";
 
 const rootRouter = express.Router();
 
 // Mount unauthenticated routes
+
+// Basic route
+rootRouter.get("/", (req: Request, res: Response) => {
+    res.json({ message: "Welcome to InvoSync API" });
+});
+
 rootRouter.use("/users", userRouter);
 
 // Apply token verification for all subsequent routes

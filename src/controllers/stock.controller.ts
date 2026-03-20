@@ -5,6 +5,9 @@ import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import Stock from "../models/stock.model";
 import ApiResponse from "../utils/ApiResponse";
 import { ApiError, getServerErrorLog } from "../utils";
+import moment from "moment-timezone";
+
+const IST = "Asia/Kolkata";
 
 import { addJourneyLog } from "../services/logger.service";
 
@@ -24,17 +27,8 @@ export const getAllRequests = async (
       );
     }
 
-    const start = new Date(startDate as string);
-    const end = new Date(endDate as string);
-
-    // Check if the dates are valid
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-      return ApiResponse(res, 400, false, "Invalid date format");
-    }
-
-    // Adjust to full day range in IST (assuming dates are in IST)
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
+    const start = moment.tz(startDate as string, IST).startOf("day").toDate();
+    const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
     // Fetch all requests in the date range
     const requests = await Stock.find({
@@ -281,10 +275,8 @@ export const rejectInventoryRequest = async (
     });
 
     const io = req.app.get("io");
-    const startTime = new Date();
-    startTime.setHours(0, 0, 0, 0);
-    const endTime = new Date();
-    endTime.setHours(23, 59, 59, 999);
+    const startTime = moment.tz(IST).startOf("day").toDate();
+    const endTime = moment.tz(IST).endOf("day").toDate();
     const createdAt = result.createdAt;
     if (createdAt >= startTime && createdAt <= endTime) {
       io.emit("INVENTORY_REJECTED", result._id);

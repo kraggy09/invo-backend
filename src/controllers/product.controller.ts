@@ -10,11 +10,9 @@ import {
 } from "../utils";
 import mongoose from "mongoose";
 import Counter from "../models/counter.model";
-import Logger from "../models/logger.model";
 import Customer from "../models/customer.model";
 import Transaction from "../models/transaction.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
-import { IStock } from "../types/stock.type";
 import Stock from "../models/stock.model";
 import moment from "moment-timezone";
 import { EVENTS_MAP } from "../constant/redisMap";
@@ -285,32 +283,43 @@ export const updateProductDetails = async (req: Request, res: Response) => {
       io.emit(EVENTS_MAP.PRODUCT_UPDATED, updatedProduct);
     }
 
+    const changes: string[] = [];
+    const changeMetadata: any = {
+      before: {},
+      after: {}
+    };
+
+    if (previousProduct) {
+      Object.keys(updatedData).forEach((key) => {
+        const oldValue = (previousProduct as any)[key];
+        const newValue = updatedData[key];
+
+        if (Array.isArray(newValue)) {
+          if (JSON.stringify(newValue.sort()) !== JSON.stringify(oldValue?.sort())) {
+            changes.push(`${key} changed`);
+            changeMetadata.before[key] = oldValue;
+            changeMetadata.after[key] = newValue;
+          }
+        } else if (oldValue !== newValue) {
+          changes.push(`${key}: ${oldValue} -> ${newValue}`);
+          changeMetadata.before[key] = oldValue;
+          changeMetadata.after[key] = newValue;
+        }
+      });
+    }
+
     await addJourneyLog(
       req,
       "PRODUCT_UPDATED",
-      `Product ${updatedProduct.name} updated`,
+      changes.length > 0
+        ? `Product ${updatedProduct.name} updated: ${changes.join(", ")}`
+        : `Product ${updatedProduct.name} updated`,
       (req as any).user?._id || null,
       "Product",
       updatedProduct._id,
       {
-        stock: updatedProduct.stock,
-        mrp: updatedProduct.mrp,
-        costPrice: updatedProduct.costPrice,
-        retailPrice: updatedProduct.retailPrice,
-        wholesalePrice: updatedProduct.wholesalePrice,
-        superWholesalePrice: updatedProduct.superWholesalePrice,
-        packet: updatedProduct.packet,
-        box: updatedProduct.box,
-        beforeUpdate: previousProduct ? {
-          stock: previousProduct.stock,
-          mrp: previousProduct.mrp,
-          costPrice: previousProduct.costPrice,
-          retailPrice: previousProduct.retailPrice,
-          wholesalePrice: previousProduct.wholesalePrice,
-          superWholesalePrice: previousProduct.superWholesalePrice,
-          packet: previousProduct.packet,
-          box: previousProduct.box,
-        } : "fetch-error"
+        ...changeMetadata,
+        currentStock: updatedProduct.stock,
       }
     );
 

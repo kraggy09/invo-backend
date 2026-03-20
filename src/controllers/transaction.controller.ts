@@ -458,15 +458,8 @@ export const getAllTransactionsInDateRange = async (
     );
   }
   try {
-    const start = new Date(startDate as string);
-    const end = new Date(endDate as string);
-
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-      return ApiResponse(res, 400, false, "Invalid date format");
-    }
-
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
+    const start = moment.tz(startDate as string, IST).startOf("day").toDate();
+    const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
     const query: any = {
       createdAt: {
@@ -516,15 +509,8 @@ export const getTransactionsSummary = async (req: Request, res: Response) => {
       );
     }
 
-    const start = new Date(startDate as string);
-    const end = new Date(endDate as string);
-
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-      return ApiResponse(res, 400, false, "Invalid date format");
-    }
-
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
+    const start = moment.tz(startDate as string, IST).startOf("day").toDate();
+    const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
     const transactionStats = await Transaction.aggregate([
       {

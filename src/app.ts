@@ -25,11 +25,6 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api/v1", rootRouter);
 
-// Basic route
-app.get("/", (req: Request, res: Response) => {
-  res.json({ message: "Welcome to InvoSync API" });
-});
-
 // Error handling middleware
 app.use((err: Error, req: Request, res: Response, next: Function) => {
   console.error(err.stack);
