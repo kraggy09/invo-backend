@@ -470,7 +470,11 @@ export const getAllTransactionsInDateRange = async (
     };
 
     if (paymentIn !== undefined) {
-      query.paymentIn = paymentIn === "true";
+      const paymentInBool = paymentIn === "true";
+      query.$or = [
+        { paymentIn: paymentInBool },           // new data
+        { taken: !paymentInBool, paymentIn: { $exists: false } }  // old data (opposite logic)
+      ];
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -481,7 +485,7 @@ export const getAllTransactionsInDateRange = async (
         .populate("approvedBy", "name username")
         .skip(skip)
         .limit(Number(limit))
-        .lean(),
+        .lean().sort({ createdAt: -1 }),
       Transaction.countDocuments(query),
     ]);
 
