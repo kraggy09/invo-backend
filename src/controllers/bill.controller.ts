@@ -9,7 +9,9 @@ import Transaction from "../models/transaction.model";
 import moment from "moment-timezone";
 import { ApiError } from "../utils";
 import { EVENTS_MAP } from "../constant/redisMap";
-import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
+import { journeyQueue } from "../queues/journeyQueue";
+
+
 import { getNotificationRules } from "./notification.controller";
 import billEvents, { BILL_EVENTS } from "../events/bill.events";
 const IST = "Asia/Kolkata"; // Update with the correct path
@@ -24,53 +26,80 @@ export const createBill = async (req: Request, res: Response) => {
     paymentMode,
     discount = 0,
     createdBy,
+    idempotencyKey,
   } = req.body;
 
   const session: ClientSession = await mongoose.startSession();
 
-  try {
-    const result = await session.withTransaction(async () => {
-      // Fetch latest counters in parallel
-      const [previousBillId, previousTransactionId] = await Promise.all([
-        Counter.findOne({ name: "billId" }),
-        Counter.findOne({ name: "transactionId" }).session(session),
-      ]);
+  if (idempotencyKey) {
+    const existingBill = await Bill.findOne({ idempotencyKey })
+      .populate("customer")
+      .populate("createdBy", "name username");
 
-      if (!previousTransactionId || !previousBillId) {
-        throw new ApiError(404, "Previous transactionId or billId not found");
-      }
+    if (existingBill) {
+      const transaction = await Transaction.findOne({
+        idempotencyKey: idempotencyKey,
+        id: { $exists: true },
+      }).sort({ createdAt: -1 });
 
-      if (previousTransactionId.value !== transactionId) {
-        throw new ApiError(400, "Duplicate Transaction! Please refresh.");
-      }
-
-      if (previousBillId.value !== billId) {
-        throw new ApiError(400, "Duplicate Bill! Please refresh.");
-      }
-
-      const customer = await Customer.findById(customerId).session(session);
-      if (!customer) throw new ApiError(404, "Customer not found");
-
-      // Prepare product IDs and fetch all at once
-      const productIds = products.map(
-        (p: any) => new mongoose.Types.ObjectId(p.id)
-      );
-      const availableProducts = await Product.find(
-        { _id: { $in: productIds } },
-        { stock: 1, costPrice: 1, category: 1 } // only needed fields
-      ).session(session);
-
-      const notificationRules = await getNotificationRules(customerId);
-      const matchingNotifications = new Map<string, { rule: any, items: any[] }>();
-
-      const productMap = new Map<string, (typeof availableProducts)[0]>();
-      availableProducts.forEach((prod: any) => {
-        productMap.set(prod._id.toString(), prod);
+      return ApiResponse(res, 200, true, "Bill already exists (Idempotent)", {
+        bill: {
+          bill: existingBill,
+          updatedCustomer: existingBill.customer,
+          transaction: transaction,
+          billId: existingBill.id,
+        },
       });
+    }
+  }
+
+  try {
+    // 1. Initial reads in parallel (Outside transaction to reduce lock contention and duration)
+    const productIds = products.map((p: any) => new mongoose.Types.ObjectId(p.id));
+
+    const [
+      previousBillId,
+      previousTransactionId,
+      customer,
+      availableProducts,
+      notificationRules
+    ] = await Promise.all([
+      Counter.findOne({ name: "billId" }),
+      Counter.findOne({ name: "transactionId" }),
+      Customer.findById(customerId),
+      Product.find(
+        { _id: { $in: productIds } },
+        { stock: 1, costPrice: 1, category: 1 }
+      ),
+      getNotificationRules(customerId)
+    ]);
+
+    if (!previousTransactionId || !previousBillId) {
+      throw new ApiError(404, "Previous transactionId or billId not found");
+    }
+
+    if (previousTransactionId.value !== transactionId) {
+      throw new ApiError(400, "Duplicate Transaction! Please refresh.");
+    }
+
+    if (previousBillId.value !== billId) {
+      throw new ApiError(400, "Duplicate Bill! Please refresh.");
+    }
+
+    if (!customer) throw new ApiError(404, "Customer not found");
+
+    const productMap = new Map<string, (typeof availableProducts)[0]>();
+    availableProducts.forEach((prod: any) => {
+      productMap.set(prod._id.toString(), prod);
+    });
+
+    const result = await session.withTransaction(async () => {
 
       let billTotal = 0;
       const items: any[] = [];
       const productBulkOps: any[] = [];
+
+      const matchingNotifications = new Map<string, { rule: any, items: any[] }>();
 
       for (const productInput of products) {
         const quantity =
@@ -162,6 +191,7 @@ export const createBill = async (req: Request, res: Response) => {
             discount,
             createdBy,
             id: newBillId.value,
+            idempotencyKey,
           },
         ],
         { session }
@@ -198,6 +228,7 @@ export const createBill = async (req: Request, res: Response) => {
               paymentIn: true,
               approvedBy: createdBy,
               customer: customer._id,
+              idempotencyKey,
             },
           ],
           { session }
@@ -250,32 +281,33 @@ export const createBill = async (req: Request, res: Response) => {
     const io = req.app.get("io");
     io.emit(EVENTS_MAP.BILL_CREATED, data);
 
-    await addJourneyLog(
-      req,
-      "BILL_CREATED",
-      `Bill #${result.billId} created for ${result.updatedCustomer.name} with total ₹${result.bill.productsTotal}`,
-      createdBy,
-      "Bill",
-      populatedBill._id,
-      {
-        itemsCount: populatedBill.items.length,
-        paymentReceived: payment,
-        items: populatedBill.items.map((i: any) => ({ product: i.productSnapshot.name, quantity: i.quantity, price: i.price }))
+    // Offload journeys/logging to background worker
+    journeyQueue.add("bill-created", {
+      journeyLog: {
+        eventType: "BILL_CREATED",
+        message: `Bill #${result.billId} created for ${result.updatedCustomer.name} with total ₹${result.bill.productsTotal}`,
+        createdBy,
+        entityType: "Bill",
+        entityId: populatedBill._id,
+        metadata: {
+          itemsCount: populatedBill.items.length,
+          paymentReceived: payment,
+          items: populatedBill.items.map((i: any) => ({ product: i.productSnapshot.name, quantity: i.quantity, price: i.price }))
+        }
+      },
+      customerJourneyLog: {
+        customerId,
+        eventType: "BILL_CREATED",
+        message: `Bill #${result.billId} created for ₹${result.bill.productsTotal} ${payment > 0 ? `with payment of ₹${payment}` : ""}`,
+        createdBy,
+        amount: result.bill.productsTotal,
+        adjustments: (result.bill.total - result.bill.productsTotal),
+        outstanding: result.updatedCustomer.outstanding,
+        billId: populatedBill._id,
+        metadata: { paymentReceived: payment, itemsCount: populatedBill.items.length }
       }
-    );
+    });
 
-    await addCustomerJourneyLog(
-      req,
-      customerId,
-      "BILL_CREATED",
-      `Bill #${result.billId} created for ₹${result.bill.productsTotal} ${payment > 0 ? `with payment of ₹${payment}` : ""}`,
-      createdBy,
-      result.bill.productsTotal,
-      (result.bill.total - result.bill.productsTotal),
-      result.updatedCustomer.outstanding,
-      populatedBill._id,
-      { paymentReceived: payment, itemsCount: populatedBill.items.length }
-    );
 
     // Emit event for background processing (notifications, etc.)
     billEvents.emit(BILL_EVENTS.BILL_CREATED, {

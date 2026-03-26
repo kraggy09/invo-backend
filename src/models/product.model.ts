@@ -60,7 +60,12 @@ const productSchema = new Schema<IProduct>({
   hi: {
     type: String,
   },
-});
+  idempotencyKey: {
+    type: String,
+    unique: true,
+    sparse: true,
+  },
+}, { timestamps: true });
 
 productSchema.virtual("totalPackets").get(function () {
   return Math.floor(this.stock / this.packet);

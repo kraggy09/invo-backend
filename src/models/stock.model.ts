@@ -58,6 +58,10 @@ const stockSchema = new Schema<IStock>(
       default: false,
       required: true,
     },
+    returnBill: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ReturnBill",
+    },
   },
   { timestamps: true }
 );

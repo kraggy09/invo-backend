@@ -15,7 +15,12 @@ const customerSchema = new mongoose.Schema<ICustomer>({
     maxlength: 10,
     required: true,
   },
-});
+  idempotencyKey: {
+    type: String,
+    unique: true,
+    sparse: true,
+  },
+}, { timestamps: true });
 
 const Customer = mongoose.model("Customer", customerSchema);
 

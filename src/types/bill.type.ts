@@ -22,6 +22,7 @@ export interface IBill extends Document {
   total: number;
   payment: number;
   discount: number;
+  idempotencyKey?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }

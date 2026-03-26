@@ -12,8 +12,8 @@ import Stock from "../models/stock.model";
 import moment from "moment-timezone";
 
 const IST = "Asia/Kolkata";
-import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
 import { EVENTS_MAP } from "../constant/redisMap";
+import { journeyQueue } from "../queues/journeyQueue";
 
 // Helper function to extract logged-in user ID
 const getUserId = (req: any) => {
@@ -21,7 +21,31 @@ const getUserId = (req: any) => {
 };
 
 export const createReturnBill = async (req: Request, res: Response) => {
-    const { originalBillId, customerId, items, paymentMode, totalAmount } = req.body;
+    const { originalBillId, customerId, items, paymentMode, totalAmount, idempotencyKey } = req.body;
+
+    if (idempotencyKey) {
+        const existingReturnBill = await ReturnBill.findOne({ idempotencyKey })
+            .populate("customer")
+            .populate("createdBy", "name username")
+            .populate("items.product");
+
+        if (existingReturnBill) {
+            const transaction = await Transaction.findOne({
+                idempotencyKey
+            }).sort({ createdAt: -1 });
+
+            const stockLogs = await Stock.find({ returnBill: existingReturnBill._id })
+                .populate("product", "name stock")
+                .populate("createdBy", "name username");
+
+            return ApiResponse(res, 200, true, "Return bill already exists (Idempotent)", {
+                returnBill: existingReturnBill,
+                transaction,
+                stockLogs,
+                updatedOutstanding: existingReturnBill.newOutstanding
+            });
+        }
+    }
     const createdBy = getUserId(req);
 
     const session: ClientSession = await mongoose.startSession();
@@ -139,6 +163,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                         productsTotal: calculatedTotal, // Using calculatedTotal as the productsTotal for the return
                         previousOutstanding: customer.outstanding, // Capture snapshot of outstanding before modification
                         paymentMode,
+                        idempotencyKey,
                         // newOutstanding will be set after payment logic if ADJUSTMENT mode
                     },
                 ],
@@ -146,6 +171,13 @@ export const createReturnBill = async (req: Request, res: Response) => {
             );
 
             if (productBulkOps.length > 0) {
+                // Update stockLogOps with the new returnBill ID
+                stockLogOps.forEach((op: any) => {
+                    if (op.insertOne && op.insertOne.document) {
+                        op.insertOne.document.returnBill = newReturnBill._id;
+                    }
+                });
+
                 const bulkResult = await Product.bulkWrite(productBulkOps, { session });
                 if (bulkResult.modifiedCount !== items.length) {
                     throw new ApiError(500, "Product stock update mismatch");
@@ -156,6 +188,12 @@ export const createReturnBill = async (req: Request, res: Response) => {
                     throw new ApiError(500, "Failed to insert stock records for returns");
                 }
             }
+
+            // Fetch created stock logs to send back
+            const stockLogs = await Stock.find({ returnBill: newReturnBill._id })
+                .populate("product", "name stock")
+                .populate("createdBy", "name username")
+                .session(session);
 
             // 5. Handle Payment Logic
             let transaction = null;
@@ -189,6 +227,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                             paymentIn: true,
                             approvedBy: createdBy,
                             customer: customer._id,
+                            idempotencyKey,
                         },
                     ],
                     { session }
@@ -219,6 +258,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                             paymentIn: false,
                             approvedBy: createdBy,
                             customer: customer._id,
+                            idempotencyKey,
                         },
                     ],
                     { session }
@@ -229,6 +269,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
             return {
                 returnBill: newReturnBill,
                 transaction,
+                stockLogs,
                 updatedOutstanding: newOutstanding
             };
         });
@@ -244,43 +285,47 @@ export const createReturnBill = async (req: Request, res: Response) => {
             io.emit(EVENTS_MAP.RETURN_BILL_CREATED, {
                 returnBill: populatedRB,
                 transaction: result.transaction,
+                stockLogs: result.stockLogs,
                 updatedOutstanding: result.updatedOutstanding,
                 socketId: req.headers.socketid
             });
+
+            // Additionally emit INVENTORY_UPDATE_REQUEST to update inventory request views
+            io.emit("INVENTORY_UPDATE_REQUEST", result.stockLogs);
         }
 
-        // Journey Log
-        await addJourneyLog(
-            req,
-            "PRODUCT_RETURN",
-            `Return Bill #${populatedRB?.id} created for ${(populatedRB?.customer as any)?.name || "Customer"}. Total Returned: ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
-            createdBy,
-            "ReturnBill",
-            populatedRB?._id,
-            {
-                originalBillId,
-                itemsCount: items.length,
-                paymentMode,
-                totalAmount
+        // Journey Log (Offload to background queue)
+        journeyQueue.add("return-bill-created", {
+            journeyLog: {
+                eventType: "PRODUCT_RETURN",
+                message: `Return Bill #${populatedRB?.id} created for ${(populatedRB?.customer as any)?.name || "Customer"}. Total Returned: ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
+                createdBy,
+                entityType: "ReturnBill",
+                entityId: populatedRB?._id,
+                metadata: {
+                    originalBillId,
+                    itemsCount: items.length,
+                    paymentMode,
+                    totalAmount
+                }
+            },
+            customerJourneyLog: {
+                customerId,
+                eventType: "PRODUCT_RETURN",
+                message: `Return Bill #${populatedRB?.id} created for ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
+                createdBy,
+                amount: totalAmount,
+                previousOutstanding: populatedRB?.previousOutstanding,
+                outstanding: populatedRB?.newOutstanding,
+                billId: populatedRB?._id,
+                metadata: { originalBillId, itemsCount: items.length, paymentMode }
             }
-        );
-
-        await addCustomerJourneyLog(
-            req,
-            customerId,
-            "PRODUCT_RETURN",
-            `Return Bill #${populatedRB?.id} created for ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
-            createdBy,
-            totalAmount,
-            populatedRB?.previousOutstanding,
-            populatedRB?.newOutstanding,
-            populatedRB?._id,
-            { originalBillId, itemsCount: items.length, paymentMode }
-        );
+        });
 
         return ApiResponse(res, 201, true, "Return bill created successfully", {
             returnBill: populatedRB,
             transaction: result.transaction,
+            stockLogs: result.stockLogs,
             updatedOutstanding: result.updatedOutstanding
         });
 

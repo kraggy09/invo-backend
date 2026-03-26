@@ -7,7 +7,7 @@ import Transaction from "../models/transaction.model";
 import { EVENTS_MAP } from "../constant/redisMap";
 import CustomerJourney from "../models/customerJourney.model";
 import mongoose from "mongoose";
-import { addJourneyLog } from "../services/logger.service";
+import { journeyQueue } from "../queues/journeyQueue";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import moment from "moment-timezone";
 
@@ -16,24 +16,34 @@ const IST = "Asia/Kolkata";
 export const createNewCustomer = async (req: Request, res: Response) => {
   try {
     const customerData = req.body;
-    let { name, outstanding, phone } = customerData;
+    let { name, outstanding, phone, idempotencyKey } = customerData;
+
+    if (idempotencyKey) {
+      const existingCustomer = await Customer.findOne({ idempotencyKey });
+      if (existingCustomer) {
+        return ApiResponse(res, 200, true, "Customer already exists (Idempotent)", {
+          customer: existingCustomer,
+        });
+      }
+    }
+
+
     if (phone.length != 10) {
       return ApiResponse(res, 400, false, "Phone number should be of 10 digit");
     }
-    name = name.toLowerCase().trim();
-    let customer = await Customer.findOne({ name });
-    if (customer) {
-      return ApiResponse(res, 404, false, "Customer already exists");
-    }
-    customer = await Customer.findOne({ phone });
-    if (customer) {
-      return ApiResponse(res, 404, false, "Customer already exists");
-    }
 
+    name = name.toLowerCase().trim();
+
+    const customer = await Customer.findOne({ $or: [{ name }, { phone }] });
+
+    if (customer) {
+      return ApiResponse(res, 404, false, "Customer already exists");
+    }
     const newCustomer = await Customer.create({
       name,
       outstanding,
       phone,
+      idempotencyKey,
     });
 
     const io = req.app.get("io");
@@ -41,15 +51,16 @@ export const createNewCustomer = async (req: Request, res: Response) => {
       io.emit(EVENTS_MAP.CUSTOMER_CREATED, newCustomer);
     }
 
-    await addJourneyLog(
-      req,
-      "CUSTOMER_CREATED",
-      `Customer ${newCustomer.name} created`,
-      (req as any).user?._id || null,
-      "Customer",
-      newCustomer._id,
-      { phone: newCustomer.phone, outstanding: newCustomer.outstanding }
-    );
+    journeyQueue.add("customer-created", {
+      journeyLog: {
+        eventType: "CUSTOMER_CREATED",
+        message: `Customer ${newCustomer.name} created`,
+        createdBy: (req as any).user?._id || null,
+        entityType: "Customer",
+        entityId: newCustomer._id,
+        metadata: { phone: newCustomer.phone, outstanding: newCustomer.outstanding }
+      }
+    });
 
     return ApiResponse(res, 201, true, "Customer created successfully", {
       customer: newCustomer,

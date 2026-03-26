@@ -82,6 +82,11 @@ const billSchema = new Schema<IBill>(
       type: Number,
       default: 0,
     },
+    idempotencyKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
   },
   { timestamps: true }
 );

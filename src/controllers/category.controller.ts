@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import Category from "../models/category.model";
 import ApiResponse from "../utils/ApiResponse";
-import { addJourneyLog } from "../services/logger.service";
+import { journeyQueue } from "../queues/journeyQueue";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import Product from "../models/product.model";
@@ -35,15 +35,16 @@ export const createNewCategory = async (req: Request, res: Response) => {
         { new: true } // Return the updated document
       );
 
-      await addJourneyLog(
-        req,
-        "CATEGORY_UPDATED",
-        `Category ${name} was updated`,
-        (req as any).user?._id || null,
-        "Category",
-        updatedCategory?._id,
-        { wholesale, superWholeSale }
-      );
+      journeyQueue.add("category-updated", {
+        journeyLog: {
+          eventType: "CATEGORY_UPDATED",
+          message: `Category ${name} was updated`,
+          createdBy: (req as any).user?._id || null,
+          entityType: "Category",
+          entityId: updatedCategory?._id,
+          metadata: { wholesale, superWholeSale }
+        }
+      });
 
       const io = req.app.get("io");
       if (io) {
@@ -60,15 +61,16 @@ export const createNewCategory = async (req: Request, res: Response) => {
         superWholeSale,
       });
 
-      await addJourneyLog(
-        req,
-        "CATEGORY_CREATED",
-        `Category ${name} was created`,
-        (req as any).user?._id || null,
-        "Category",
-        newCategory._id,
-        { wholesale, superWholeSale }
-      );
+      journeyQueue.add("category-created", {
+        journeyLog: {
+          eventType: "CATEGORY_CREATED",
+          message: `Category ${name} was created`,
+          createdBy: (req as any).user?._id || null,
+          entityType: "Category",
+          entityId: newCategory._id,
+          metadata: { wholesale, superWholeSale }
+        }
+      });
 
       const io = req.app.get("io");
       if (io) {
@@ -121,15 +123,16 @@ export const updateCategory = async (req: AuthenticatedRequest, res: Response) =
       return ApiResponse(res, 404, false, "Category not found");
     }
 
-    await addJourneyLog(
-      req,
-      "CATEGORY_UPDATED",
-      `Category ${updatedCategory.name} was updated via ${req.user?.name}`,
-      (req as any).user?._id || null,
-      "Category",
-      updatedCategory._id,
-      updateData
-    );
+    journeyQueue.add("category-updated", {
+      journeyLog: {
+        eventType: "CATEGORY_UPDATED",
+        message: `Category ${updatedCategory.name} was updated via ${req.user?.name}`,
+        createdBy: (req as any).user?._id || null,
+        entityType: "Category",
+        entityId: updatedCategory._id,
+        metadata: updateData
+      }
+    });
 
     const io = req.app.get("io");
     if (io) {
@@ -169,14 +172,15 @@ export const deleteCategory = async (req: Request, res: Response) => {
 
     await Category.findByIdAndDelete(id);
 
-    await addJourneyLog(
-      req,
-      "CATEGORY_DELETED",
-      `Category ${category.name} was deleted`,
-      (req as any).user?._id || null,
-      "Category",
-      category._id
-    );
+    journeyQueue.add("category-deleted", {
+      journeyLog: {
+        eventType: "CATEGORY_DELETED",
+        message: `Category ${category.name} was deleted`,
+        createdBy: (req as any).user?._id || null,
+        entityType: "Category",
+        entityId: category._id
+      }
+    });
 
     const io = req.app.get("io");
     if (io) {

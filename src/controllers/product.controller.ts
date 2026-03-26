@@ -16,7 +16,7 @@ import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import Stock from "../models/stock.model";
 import moment from "moment-timezone";
 import { EVENTS_MAP } from "../constant/redisMap";
-import { addJourneyLog } from "../services/logger.service";
+import { journeyQueue } from "../queues/journeyQueue";
 
 const IST = "Asia/Kolkata"; // Update with the correct path
 
@@ -36,7 +36,17 @@ export const createNewProduct = async (req: Request, res: Response) => {
       packet,
       box,
       minQuantity,
+      idempotencyKey,
     } = req.body;
+
+    if (idempotencyKey) {
+      const existingProduct = await Product.findOne({ idempotencyKey });
+      if (existingProduct) {
+        return ApiResponse(res, 200, true, `Product already exists (Idempotent)`, {
+          product: existingProduct,
+        });
+      }
+    }
     const requiredFields = [
       "name",
       "category",
@@ -132,6 +142,7 @@ export const createNewProduct = async (req: Request, res: Response) => {
       minQuantity,
       hi: newOne ? newOne[0] : name,
       category,
+      idempotencyKey,
     });
 
     const io = req.app.get("io");
@@ -139,15 +150,16 @@ export const createNewProduct = async (req: Request, res: Response) => {
       io.emit(EVENTS_MAP.PRODUCT_CREATED, newProduct);
     }
 
-    await addJourneyLog(
-      req,
-      "PRODUCT_CREATED",
-      `Product ${newProduct.name} created`,
-      (req as any).user?._id || null,
-      "Product",
-      newProduct._id,
-      { mrp: newProduct.mrp, stock: newProduct.stock }
-    );
+    journeyQueue.add("product-created", {
+      journeyLog: {
+        eventType: "PRODUCT_CREATED",
+        message: `Product ${newProduct.name} created`,
+        createdBy: (req as any).user?._id || null,
+        entityType: "Product",
+        entityId: newProduct._id,
+        metadata: { mrp: newProduct.mrp, stock: newProduct.stock }
+      }
+    });
 
     // Return response
     return ApiResponse(res, 201, true, `Product created successfully`, {
@@ -308,20 +320,21 @@ export const updateProductDetails = async (req: Request, res: Response) => {
       });
     }
 
-    await addJourneyLog(
-      req,
-      "PRODUCT_UPDATED",
-      changes.length > 0
-        ? `Product ${updatedProduct.name} updated: ${changes.join(", ")}`
-        : `Product ${updatedProduct.name} updated`,
-      (req as any).user?._id || null,
-      "Product",
-      updatedProduct._id,
-      {
-        ...changeMetadata,
-        currentStock: updatedProduct.stock,
+    journeyQueue.add("product-updated", {
+      journeyLog: {
+        eventType: "PRODUCT_UPDATED",
+        message: changes.length > 0
+          ? `Product ${updatedProduct.name} updated: ${changes.join(", ")}`
+          : `Product ${updatedProduct.name} updated`,
+        createdBy: (req as any).user?._id || null,
+        entityType: "Product",
+        entityId: updatedProduct._id,
+        metadata: {
+          ...changeMetadata,
+          currentStock: updatedProduct.stock,
+        }
       }
-    );
+    });
 
     return ApiResponse(res, 200, true, "Product Updated Successfully", {
       product: updatedProduct,
@@ -346,14 +359,15 @@ export const deleteProduct = async (req: Request, res: Response) => {
           io.emit(EVENTS_MAP.PRODUCT_DELETED, deletedProduct._id);
         }
 
-        await addJourneyLog(
-          req,
-          "PRODUCT_DELETED",
-          `Product ${deletedProduct.name} deleted`,
-          (req as any).user?._id || null,
-          "Product",
-          deletedProduct._id
-        );
+        journeyQueue.add("product-deleted", {
+          journeyLog: {
+            eventType: "PRODUCT_DELETED",
+            message: `Product ${deletedProduct.name} deleted`,
+            createdBy: (req as any).user?._id || null,
+            entityType: "Product",
+            entityId: deletedProduct._id
+          }
+        });
         return ApiResponse(res, 201, true, "Product deleted successfully");
       }
     }
@@ -361,251 +375,5 @@ export const deleteProduct = async (req: Request, res: Response) => {
     return ApiResponse(res, 404, false, "Product not found");
   } catch (error: any) {
     return ApiResponse(res, 500, false, error.message || "Server error");
-  }
-};
-
-export const returnProduct = async (
-  req: AuthenticatedRequest,
-  res: Response
-) => {
-  const abc = req.body;
-  const user = req.user;
-  if (!user) {
-    return ApiResponse(res, 401, false, "Unauthorised user");
-  }
-  let { purchased, foundCustomer, billId, transactionId, returnType, total } =
-    abc;
-
-  const session = await mongoose.startSession();
-  try {
-    await session.withTransaction(async () => {
-      // Validate billId
-      const previousBillId = await Counter.findOne({ name: "billId" }).session(
-        session
-      );
-      const previousTransactionId = await Counter.findOne({
-        name: "transactionId",
-      }).session(session);
-
-      if (!previousBillId || !previousTransactionId) {
-        throw new ApiError(404, "TransactionId or BillId not found");
-      }
-
-      if (previousBillId.value !== billId) {
-        throw new ApiError(400, "Duplicate bill !! Pls refresh");
-      }
-
-      if (previousTransactionId.value !== transactionId) {
-        throw new ApiError(400, "Duplicate Transaction !! Pls refresh");
-      }
-
-      if (purchased.length === 0) {
-        throw new ApiError(400, "No products to return");
-      }
-
-      // Prepare bulk operations for product stock updates and logger entries
-      const productBulkOperations = [];
-      const items = [];
-
-      for (const product of purchased) {
-        const quantity =
-          product.piece +
-          product.packet * product.packetQuantity +
-          product.box * product.boxQuantity;
-
-        const id = new mongoose.Types.ObjectId(product.id);
-
-        // Prepare stock update operation
-        productBulkOperations.push({
-          updateOne: {
-            filter: { _id: id },
-            update: { $inc: { stock: quantity } },
-          },
-        });
-
-        // Fetch product details for logging
-        const availableProduct = await Product.findById(id).session(session);
-        if (!availableProduct) {
-          throw new ApiError(
-            404,
-            `Product not found: ${product.name || product.id}`
-          );
-        }
-
-
-        // Prepare item details for daily report
-        items.push({
-          product: availableProduct._id,
-          quantity,
-          previousQuantity: availableProduct.stock,
-        });
-      }
-
-      // Execute bulk write for product stock updates
-      const bulkWriteResult = await Product.bulkWrite(productBulkOperations, {
-        session,
-      });
-      if (bulkWriteResult.modifiedCount !== purchased.length) {
-        throw new ApiError(500, "Failed to update all product stocks");
-      }
-
-
-      // Handle return type
-      let transaction = null;
-      if (returnType === "adjustment") {
-        // Fetch and validate customer
-        foundCustomer = await Customer.findById(foundCustomer._id).session(
-          session
-        );
-        if (!foundCustomer) {
-          throw new ApiError(404, "Customer not found");
-        }
-
-        const newOutstanding = foundCustomer.outstanding - total;
-
-        let newTransactionId = await Counter.findOneAndUpdate(
-          { name: "transactionId" },
-          { $inc: { value: 1 } },
-          { new: true, session }
-        );
-
-        if (!newTransactionId) {
-          throw new ApiError(500, "Unable to create transaction id");
-        }
-
-        // Create transaction
-        transaction = await Transaction.create(
-          [
-            {
-              id: newTransactionId.value,
-              name: foundCustomer.name,
-              previousOutstanding: foundCustomer.outstanding,
-              amount: total,
-              newOutstanding,
-              approvedBy: req.user?.id,
-              taken: false,
-              purpose: "Return Product",
-              paymentMode: "PRODUCT_RETURN",
-              approved: true,
-              customer: foundCustomer._id,
-            },
-          ],
-          { session }
-        );
-
-        if (!transaction[0]) {
-          throw new ApiError(500, "Unable to create the transaction");
-        }
-
-        // Update customer outstanding balance
-        const updatedCustomer = await Customer.findByIdAndUpdate(
-          foundCustomer._id,
-          { $inc: { outstanding: -total } },
-          { session }
-        );
-
-        if (!updatedCustomer) {
-          throw new ApiError(
-            500,
-            "Unable to update customer's outstanding balance"
-          );
-        }
-      } else {
-        const newTransactionId = await Counter.findOneAndUpdate(
-          { name: "transactionId" },
-          { $inc: { value: 1 } },
-          { new: true, session }
-        );
-
-        if (!newTransactionId) {
-          throw new ApiError(500, "Unable to create transaction id");
-        }
-
-        transaction = await Transaction.create(
-          [
-            {
-              id: newTransactionId.value,
-              name: "PRODUCT_ReTURN",
-              amount: total,
-              taken: true,
-              purpose: "return",
-              paymentMode: "CASH",
-              approved: true,
-            },
-          ],
-          { session }
-        );
-
-        if (!transaction[0]) {
-          throw new ApiError(500, "Unable to create the transaction");
-        }
-      }
-
-      const updateStockRequest = items.map((item) => ({
-        insertOne: {
-          document: {
-            approvedBy: user._id,
-            product: item.product,
-            oldStock: item.previousQuantity,
-            stockAtUpdate: item.previousQuantity,
-            quantity: item.quantity,
-            newStock: item.previousQuantity + item.quantity,
-            approved: true,
-            purpose: "PRODUCT_RETURN",
-            createdBy: user._id,
-            date: moment.tz(getCurrentDateAndTime(), IST),
-          },
-        },
-      }));
-
-      const updateStockInBulk = await Stock.bulkWrite(updateStockRequest, {
-        session,
-      });
-
-      if (updateStockInBulk.insertedCount !== items.length) {
-        throw new ApiError(500, "Failed to insert stock records");
-      }
-
-      let newBillId = await Counter.findOneAndUpdate(
-        { name: "billId" },
-        { $inc: { value: 1 } },
-        { new: true, session }
-      );
-
-      if (!newBillId) {
-        throw new ApiError(500, "Unable to create the bill id");
-      }
-
-      // Important: emit product stock updates
-      const io = req.app.get("io");
-      if (io) {
-        items.forEach((item) => {
-          io.emit(EVENTS_MAP.PRODUCT_UPDATED, {
-            _id: item.product,
-            stock: item.previousQuantity + item.quantity,
-          });
-        });
-      }
-
-      // Success response
-      await addJourneyLog(
-        req,
-        "PRODUCT_RETURNED",
-        `Products returned for bill #${billId}`,
-        user._id,
-        "Transaction",
-        transaction ? transaction[0]?._id : undefined,
-        { itemsCount: items.length }
-      );
-
-      return ApiResponse(res, 200, true, "Updated successfully", {
-        transaction,
-      });
-    });
-  } catch (error: any) {
-    return getServerErrorLog(res, error);
-  } finally {
-    // End session
-    session.endSession();
   }
 };

@@ -3,6 +3,8 @@ import http from "http";
 import configureSocketIO from "./config/socket.config";
 import setupSocketHandlers from "./sockets";
 import connection from "./db/dbConfig";
+import { initJourneyWorker } from "./workers/journeyWorker";
+
 const PORT = process.env.PORT || 3000;
 const url = process.env.MONGO_URI as string;
 
@@ -17,7 +19,9 @@ server.listen(PORT, async () => {
     console.log("✅ Socket.IO configured successfully!");
 
     setupSocketHandlers(io);
+    initJourneyWorker(io);
   } catch (error) {
+
     console.error("❌ Error configuring Socket.IO:", error);
   }
 });

@@ -72,6 +72,11 @@ const transactionSchema = new Schema<ITransaction>({
     enum: ["CASH", "ONLINE", "PRODUCT_RETURN", "ADJUSTMENT"],
     required: true,
   },
+  idempotencyKey: {
+    type: String,
+    unique: true,
+    sparse: true,
+  },
 }, { timestamps: true });
 
 transactionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 5284000 });

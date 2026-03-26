@@ -9,7 +9,7 @@ import moment from "moment-timezone";
 
 const IST = "Asia/Kolkata";
 
-import { addJourneyLog } from "../services/logger.service";
+import { journeyQueue } from "../queues/journeyQueue";
 
 export const getAllRequests = async (
   req: AuthenticatedRequest,
@@ -182,15 +182,16 @@ export const updateInventoryRequest = async (
     }
     console.log("Inventory update request created:", result);
 
-    await addJourneyLog(
-      req,
-      "STOCK_REQUEST_CREATED",
-      `Stock update request created for ${products.length} products`,
-      userId,
-      "StockRequest",
-      null,
-      { count: products.length }
-    );
+    journeyQueue.add("stock-request-created", {
+      journeyLog: {
+        eventType: "STOCK_REQUEST_CREATED",
+        message: `Stock update request created for ${products.length} products`,
+        createdBy: userId,
+        entityType: "StockRequest",
+        entityId: null,
+        metadata: { count: products.length }
+      }
+    });
 
     // Success response
     return ApiResponse(res, 201, true, "Sent for verification to admin", {
@@ -283,14 +284,15 @@ export const rejectInventoryRequest = async (
       io.emit("INVENTORY_REJECTED", result._id);
     }
 
-    await addJourneyLog(
-      req,
-      "STOCK_REQUEST_REJECTED",
-      `Stock update request was rejected`,
-      userId,
-      "StockRequest",
-      result._id
-    );
+    journeyQueue.add("stock-request-rejected", {
+      journeyLog: {
+        eventType: "STOCK_REQUEST_REJECTED",
+        message: `Stock update request was rejected`,
+        createdBy: userId,
+        entityType: "StockRequest",
+        entityId: result._id
+      }
+    });
 
     return ApiResponse(res, 200, true, "Request rejected successfully", result);
   } catch (error: any) {
@@ -516,18 +518,19 @@ export const acceptAllInventoryRequest = async (
       io.emit("INVENTORY_UPDATED", { action: "acceptAll", data: result });
     }
 
-    await addJourneyLog(
-      req,
-      "STOCK_REQUEST_APPROVED",
-      `Stock update requests for ${result.updatedCount} products approved`,
-      userId,
-      "StockRequest",
-      null,
-      {
-        updatedCount: result.updatedCount,
-        stockChanges: result.updatedProducts
+    journeyQueue.add("stock-request-approved", {
+      journeyLog: {
+        eventType: "STOCK_REQUEST_APPROVED",
+        message: `Stock update requests for ${result.updatedCount} products approved`,
+        createdBy: userId,
+        entityType: "StockRequest",
+        entityId: null,
+        metadata: {
+          updatedCount: result.updatedCount,
+          stockChanges: result.updatedProducts
+        }
       }
-    );
+    });
 
     return ApiResponse(res, 200, true, `All stock updates successful`);
   } catch (error: any) {

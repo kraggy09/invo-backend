@@ -22,4 +22,5 @@ export interface IReturnBill extends Document {
     newOutstanding?: number;
     createdAt?: Date;
     updatedAt?: Date;
+    idempotencyKey?: string;
 }

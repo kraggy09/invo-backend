@@ -75,6 +75,11 @@ const returnBillSchema = new Schema<IReturnBill>(
         newOutstanding: {
             type: Number,
         },
+        idempotencyKey: {
+            type: String,
+            unique: true,
+            sparse: true,
+        },
     },
     { timestamps: true }
 );

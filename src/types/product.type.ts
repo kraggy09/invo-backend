@@ -15,6 +15,7 @@ export interface IProduct extends Document {
   box: number;
   minQuantity: number;
   hi?: string;
+  idempotencyKey?: string;
 
   // Virtuals
   totalPackets: number;

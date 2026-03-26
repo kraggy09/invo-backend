@@ -8,12 +8,22 @@ import Customer from "../models/customer.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import moment from "moment-timezone";
-import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
+import { journeyQueue } from "../queues/journeyQueue";
 
 const IST = "Asia/Kolkata";
 
 export const createNewTransaction = async (req: AuthenticatedRequest, res: Response) => {
-  const { name, amount, purpose, transactionId } = req.body;
+  const { name, amount, purpose, transactionId, idempotencyKey } = req.body;
+
+  if (idempotencyKey) {
+    const existingTransaction = await Transaction.findOne({ idempotencyKey });
+    if (existingTransaction) {
+      return ApiResponse(res, 200, true, "Transaction already exists (Idempotent)", {
+        transaction: { newTransaction: existingTransaction },
+      });
+    }
+  }
+
   const session = await mongoose.startSession();
   const user = req.user
 
@@ -63,7 +73,7 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
             approvedBy: user?._id || user?.id,
             paymentIn: false,
             paymentMode: "CASH",
-
+            idempotencyKey,
           },
         ],
         { session }
@@ -84,28 +94,27 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
       io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
-    await addJourneyLog(
-      req,
-      "TRANSACTION_CREATED",
-      `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
-      (req.user as any)?._id || (req.user as any)?.id,
-      "Transaction",
-      (result as any)?.newTransaction?._id,
-      { amount, purpose, party: (result as any)?.newTransaction?.name }
-    );
-
-    await addCustomerJourneyLog(
-      req,
-      (result as any)?.newTransaction?.customer,
-      "TRANSACTION_CREATED",
-      `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
-      (req.user as any)?._id || (req.user as any)?.id,
-      amount,
-      (result as any)?.newTransaction?.previousOutstanding || 0,
-      (result as any)?.newTransaction?.newOutstanding || 0,
-      (result as any)?.newTransaction?._id,
-      { purpose, paymentIn: false, paymentMode: "CASH" }
-    );
+    journeyQueue.add("transaction-created", {
+      journeyLog: {
+        eventType: "TRANSACTION_CREATED",
+        message: `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
+        createdBy: (req.user as any)?._id || (req.user as any)?.id,
+        entityType: "Transaction",
+        entityId: (result as any)?.newTransaction?._id,
+        metadata: { amount, purpose, party: (result as any)?.newTransaction?.name }
+      },
+      customerJourneyLog: {
+        customerId: (result as any)?.newTransaction?.customer,
+        eventType: "TRANSACTION_CREATED",
+        message: `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
+        createdBy: (req.user as any)?._id || (req.user as any)?.id,
+        amount,
+        previousOutstanding: (result as any)?.newTransaction?.previousOutstanding || 0,
+        outstanding: (result as any)?.newTransaction?.newOutstanding || 0,
+        billId: (result as any)?.newTransaction?._id,
+        metadata: { purpose, paymentIn: false, paymentMode: "CASH" }
+      }
+    });
 
     session.endSession();
 
@@ -121,7 +130,17 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
 };
 
 export const createNewPayment = async (req: Request, res: Response) => {
-  let { name, customerId, amount, paymentMode, transactionId } = req.body;
+  let { name, customerId, amount, paymentMode, transactionId, idempotencyKey } = req.body;
+
+  if (idempotencyKey) {
+    const existingTransaction = await Transaction.findOne({ idempotencyKey });
+    if (existingTransaction) {
+      return ApiResponse(res, 200, true, "Payment already exists (Idempotent)", {
+        payment: { newTransaction: existingTransaction },
+      });
+    }
+  }
+
   const session = await mongoose.startSession();
 
   try {
@@ -184,6 +203,7 @@ export const createNewPayment = async (req: Request, res: Response) => {
             customer: customer._id,
             approved: false,
             paymentIn: true,
+            idempotencyKey,
           },
         ],
         { session }
@@ -204,28 +224,27 @@ export const createNewPayment = async (req: Request, res: Response) => {
       io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
-    await addJourneyLog(
-      req,
-      "PAYMENT_CREATED",
-      `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
-      (req as any).user?._id || null,
-      "Transaction",
-      (result as any)?.newTransaction?._id,
-      { amount, paymentMode, party: (result as any)?.newTransaction?.name }
-    );
-
-    await addCustomerJourneyLog(
-      req,
-      customerId,
-      "PAYMENT_CREATED",
-      `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
-      (req as any).user?._id || null,
-      amount,
-      (result as any)?.newTransaction?.previousOutstanding,
-      (result as any)?.newTransaction?.newOutstanding,
-      (result as any)?.newTransaction?._id,
-      { paymentMode, paymentIn: true }
-    );
+    journeyQueue.add("payment-created", {
+      journeyLog: {
+        eventType: "PAYMENT_CREATED",
+        message: `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
+        createdBy: (req as any).user?._id || null,
+        entityType: "Transaction",
+        entityId: (result as any)?.newTransaction?._id,
+        metadata: { amount, paymentMode, party: (result as any)?.newTransaction?.name }
+      },
+      customerJourneyLog: {
+        customerId,
+        eventType: "PAYMENT_CREATED",
+        message: `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
+        createdBy: (req as any).user?._id || null,
+        amount,
+        previousOutstanding: (result as any)?.newTransaction?.previousOutstanding,
+        outstanding: (result as any)?.newTransaction?.newOutstanding,
+        billId: (result as any)?.newTransaction?._id,
+        metadata: { paymentMode, paymentIn: true }
+      }
+    });
 
     session.endSession();
 
@@ -296,28 +315,27 @@ export const approveTransaction = async (
       // io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
     }
 
-    await addJourneyLog(
-      req,
-      "TRANSACTION_APPROVED",
-      `Transaction #${(transaction as any)?.id} was approved`,
-      userId,
-      "Transaction",
-      (transaction as any)?._id,
-      { amount: (transaction as any)?.amount }
-    );
-
-    await addCustomerJourneyLog(
-      req,
-      (transaction as any)?.customer,
-      "TRANSACTION_APPROVED",
-      `Transaction #${(transaction as any)?.id} of ₹${(transaction as any)?.amount} was approved`,
-      userId,
-      (transaction as any)?.amount,
-      (transaction as any)?.previousOutstanding,
-      (transaction as any)?.newOutstanding,
-      (transaction as any)?._id,
-      { paymentIn: (transaction as any)?.paymentIn }
-    );
+    journeyQueue.add("transaction-approved", {
+      journeyLog: {
+        eventType: "TRANSACTION_APPROVED",
+        message: `Transaction #${(transaction as any)?.id} was approved`,
+        createdBy: userId,
+        entityType: "Transaction",
+        entityId: (transaction as any)?._id,
+        metadata: { amount: (transaction as any)?.amount }
+      },
+      customerJourneyLog: {
+        customerId: (transaction as any)?.customer,
+        eventType: "TRANSACTION_APPROVED",
+        message: `Transaction #${(transaction as any)?.id} of ₹${(transaction as any)?.amount} was approved`,
+        createdBy: userId,
+        amount: (transaction as any)?.amount,
+        previousOutstanding: (transaction as any)?.previousOutstanding,
+        outstanding: (transaction as any)?.newOutstanding,
+        billId: (transaction as any)?._id,
+        metadata: { paymentIn: (transaction as any)?.paymentIn }
+      }
+    });
 
     // Success response
 
@@ -366,28 +384,27 @@ export const rejectTransaction = async (
       });
     }
 
-    await addJourneyLog(
-      req,
-      "TRANSACTION_REJECTED",
-      `Transaction #${(transaction as any)?.id} was rejected`,
-      userId,
-      "Transaction",
-      (transaction as any)?._id,
-      { amount: (transaction as any)?.amount }
-    );
-
-    await addCustomerJourneyLog(
-      req,
-      (transaction as any)?.customer,
-      "TRANSACTION_REJECTED",
-      `Transaction #${(transaction as any)?.id} of ₹${(transaction as any)?.amount} was rejected`,
-      userId,
-      (transaction as any)?.amount,
-      (transaction as any)?.previousOutstanding,
-      (transaction as any)?.previousOutstanding, // Remains same as previous
-      (transaction as any)?._id,
-      { paymentIn: (transaction as any)?.paymentIn }
-    );
+    journeyQueue.add("transaction-rejected", {
+      journeyLog: {
+        eventType: "TRANSACTION_REJECTED",
+        message: `Transaction #${(transaction as any)?.id} was rejected`,
+        createdBy: userId,
+        entityType: "Transaction",
+        entityId: (transaction as any)?._id,
+        metadata: { amount: (transaction as any)?.amount }
+      },
+      customerJourneyLog: {
+        customerId: (transaction as any)?.customer,
+        eventType: "TRANSACTION_REJECTED",
+        message: `Transaction #${(transaction as any)?.id} of ₹${(transaction as any)?.amount} was rejected`,
+        createdBy: userId,
+        amount: (transaction as any)?.amount,
+        previousOutstanding: (transaction as any)?.previousOutstanding,
+        outstanding: (transaction as any)?.previousOutstanding, // Remains same
+        billId: (transaction as any)?._id,
+        metadata: { paymentIn: (transaction as any)?.paymentIn }
+      }
+    });
     return ApiResponse(res, 200, true, "Transaction deleted successfully");
   } catch (error: any) {
     return ApiResponse(res, 500, false, error.message || "Server Error");
