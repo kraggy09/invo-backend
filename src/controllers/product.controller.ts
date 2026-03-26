@@ -2,19 +2,7 @@ import axios from "axios";
 import { Request, Response } from "express";
 import Product from "../models/product.model";
 import ApiResponse from "../utils/ApiResponse";
-import {
-  ApiError,
-  getCurrentDateAndTime,
-  getDate,
-  getServerErrorLog,
-} from "../utils";
-import mongoose from "mongoose";
-import Counter from "../models/counter.model";
-import Customer from "../models/customer.model";
-import Transaction from "../models/transaction.model";
-import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
-import Stock from "../models/stock.model";
-import moment from "moment-timezone";
+
 import { EVENTS_MAP } from "../constant/redisMap";
 import { journeyQueue } from "../queues/journeyQueue";
 

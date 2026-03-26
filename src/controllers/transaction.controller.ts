@@ -417,9 +417,7 @@ export const getAllTransactions = async (req: Request, res: Response) => {
     const transactions = await Transaction.find({
       approved: false,
       rejectedAt: { $exists: false }
-    }).sort({
-      createdAt: -1,
-    });
+    })
 
     // Return successful response with the transactions
     return ApiResponse(res, 200, true, "Transactions found successfully", {

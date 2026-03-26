@@ -4,7 +4,6 @@ import {
   deleteProduct,
   getAllproduct,
   getProduct,
-  returnProduct,
   updateProductDetails,
 } from "../controllers/product.controller";
 import { isAllowed } from "../services/token.service";
@@ -13,7 +12,6 @@ const allowedRoles = ["SUPER_ADMIN", "ADMIN", "CREATOR"];
 
 
 productRouter.route("/").post(createNewProduct).get(getAllproduct);
-productRouter.route("/return").post(returnProduct);
 
 productRouter.use("/:id", isAllowed(allowedRoles));
 
