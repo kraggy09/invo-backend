@@ -94,7 +94,7 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
       io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
-    journeyQueue.add("transaction-created", {
+    const journeyData: any = {
       journeyLog: {
         eventType: "TRANSACTION_CREATED",
         message: `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
@@ -102,8 +102,11 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
         entityType: "Transaction",
         entityId: (result as any)?.newTransaction?._id,
         metadata: { amount, purpose, party: (result as any)?.newTransaction?.name }
-      },
-      customerJourneyLog: {
+      }
+    };
+
+    if ((result as any)?.newTransaction?.customer) {
+      journeyData.customerJourneyLog = {
         customerId: (result as any)?.newTransaction?.customer,
         eventType: "TRANSACTION_CREATED",
         message: `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
@@ -113,8 +116,10 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
         outstanding: (result as any)?.newTransaction?.newOutstanding || 0,
         billId: (result as any)?.newTransaction?._id,
         metadata: { purpose, paymentIn: false, paymentMode: "CASH" }
-      }
-    });
+      };
+    }
+
+    journeyQueue.add("transaction-created", journeyData);
 
     session.endSession();
 

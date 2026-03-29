@@ -49,6 +49,11 @@ export const addCustomerJourneyLog = async (
     entityId?: any,
     metadata?: any
 ) => {
+    if (!customer) {
+        console.warn(`⚠️ Skipping customer journey log: 'customer' ID is missing. Action: ${action}`);
+        return null;
+    }
+
     try {
         const log = await CustomerJourney.create({
             customer,
