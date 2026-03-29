@@ -20,7 +20,7 @@ export interface IReturnBill extends Document {
     productsTotal?: number;
     previousOutstanding?: number;
     newOutstanding?: number;
-    createdAt?: Date;
-    updatedAt?: Date;
+    createdAt: Date;
+    updatedAt: Date;
     idempotencyKey?: string;
 }

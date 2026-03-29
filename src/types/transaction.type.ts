@@ -15,7 +15,7 @@ export interface ITransaction extends Document {
   approvedAt?: Date;
   rejectedAt?: Date;
   paymentIn: boolean;
-  createdAt?: Date;
+  createdAt: Date;
   idempotencyKey?: string;
   paymentMode: "CASH" | "ONLINE" | "PRODCT_RETURN";
 }
