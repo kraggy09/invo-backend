@@ -16,46 +16,83 @@ export const getAllRequests = async (
   res: Response
 ) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, page = 1, limit = 15, search, status } = req.query;
 
     if (!startDate || !endDate) {
-      return ApiResponse(
-        res,
-        400,
-        false,
-        "Both startDate and endDate are required"
-      );
+      return ApiResponse(res, 400, false, "Both startDate and endDate are required");
     }
 
     const start = moment.tz(startDate as string, IST).startOf("day").toDate();
     const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
-    // Fetch all requests in the date range
-    const requests = await Stock.find({
+    const query: any = {
       date: {
         $gte: start,
         $lte: end,
       },
-    })
-      .populate([
-        { path: "product", select: "name stock" },
-        { path: "createdBy", select: "name username" },
-        { path: "actionBy", select: "name username" },
-      ])
-      .sort({ createdAt: -1 })
-      .lean()
-      .exec();
+    };
+
+    if (status && status !== "all") {
+      if (status === "Approved") query.approved = true;
+      else if (status === "Rejected") query.rejected = true;
+      else if (status === "Pending") {
+        query.approved = false;
+        query.rejected = false;
+      }
+    }
+
+    if (search) {
+      const searchStr = String(search).trim();
+
+      const products = await mongoose.model("Product").find({ name: { $regex: searchStr, $options: "i" } }).select("_id").lean();
+      const productIds = products.map((p: any) => p._id);
+
+      const users = await mongoose.model("User").find({
+        $or: [
+          { name: { $regex: searchStr, $options: "i" } },
+          { username: { $regex: searchStr, $options: "i" } }
+        ]
+      }).select("_id").lean();
+      const userIds = users.map((u: any) => u._id);
+
+      query.$or = [
+        { product: { $in: productIds } },
+        { createdBy: { $in: userIds } }
+      ];
+    }
+
+    const skip = (Number(page) - 1) * Number(limit);
+
+    // Fetch requests in the date range with pagination
+    const [requests, total] = await Promise.all([
+      Stock.find(query)
+        .populate([
+          { path: "product", select: "name stock" },
+          { path: "createdBy", select: "name username" },
+          { path: "actionBy", select: "name username" },
+        ])
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean()
+        .exec(),
+      Stock.countDocuments(query)
+    ]);
 
     if (requests.length > 0) {
-      return ApiResponse(res, 200, true, "Requests found", { requests });
+      return ApiResponse(res, 200, true, "Requests found", {
+        requests,
+        total,
+        page: Number(page),
+        limit: Number(limit)
+      });
     } else {
-      return ApiResponse(
-        res,
-        200,
-        true,
-        "No requests found for the given date range",
-        { requests: [] }
-      );
+      return ApiResponse(res, 200, true, "No requests found for the given date range", {
+        requests: [],
+        total: 0,
+        page: Number(page),
+        limit: Number(limit)
+      });
     }
   } catch (error: any) {
     return ApiResponse(res, 500, false, "Server error", error.message);

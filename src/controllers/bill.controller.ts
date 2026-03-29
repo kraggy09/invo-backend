@@ -455,7 +455,7 @@ export async function getBillsByProductNameAndDate(
 
 export const getAllBillsInDateRange = async (req: Request, res: Response) => {
   try {
-    const { startDate, endDate, page = 1, limit = 10, search } = req.query;
+    const { startDate, endDate, page = 1, limit = 10, search, minAmount, maxAmount } = req.query;
 
     if (!startDate || !endDate) {
       return ApiResponse(res, 400, false, "Both startDate and endDate are required");
@@ -472,6 +472,12 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
         $lte: end,
       },
     };
+
+    if (minAmount !== undefined || maxAmount !== undefined) {
+      matchQuery.productsTotal = {};
+      if (minAmount !== undefined) matchQuery.productsTotal.$gte = Number(minAmount);
+      if (maxAmount !== undefined) matchQuery.productsTotal.$lte = Number(maxAmount);
+    }
 
     if (search) {
       const searchStr = String(search).trim();

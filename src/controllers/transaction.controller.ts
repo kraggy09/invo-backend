@@ -467,7 +467,7 @@ export const getAllTransactionsInDateRange = async (
   req: Request,
   res: Response
 ) => {
-  const { startDate, endDate, page = 1, limit = 10, paymentIn } = req.query;
+  const { startDate, endDate, page = 1, limit = 10, paymentIn, search, minAmount, maxAmount } = req.query;
 
   if (!startDate || !endDate) {
     return ApiResponse(
@@ -489,12 +489,38 @@ export const getAllTransactionsInDateRange = async (
       approved: true,
     };
 
+    if (minAmount !== undefined || maxAmount !== undefined) {
+      query.amount = {};
+      if (minAmount !== undefined) query.amount.$gte = Number(minAmount);
+      if (maxAmount !== undefined) query.amount.$lte = Number(maxAmount);
+    }
+
+    const andConditions: any[] = [];
+
     if (paymentIn !== undefined) {
       const paymentInBool = paymentIn === "true";
-      query.$or = [
-        { paymentIn: paymentInBool },           // new data
-        { taken: !paymentInBool, paymentIn: { $exists: false } }  // old data (opposite logic)
+      andConditions.push({
+        $or: [
+          { paymentIn: paymentInBool },           // new data
+          { taken: !paymentInBool, paymentIn: { $exists: false } }  // old data (opposite logic)
+        ]
+      });
+    }
+
+    if (search) {
+      const searchStr = String(search).trim();
+      const numSearch = Number(searchStr);
+      const orConditions: any[] = [
+        { name: { $regex: searchStr, $options: "i" } }
       ];
+      if (!isNaN(numSearch)) {
+        orConditions.push({ id: numSearch });
+      }
+      andConditions.push({ $or: orConditions });
+    }
+
+    if (andConditions.length > 0) {
+      query.$and = andConditions;
     }
 
     const skip = (Number(page) - 1) * Number(limit);
