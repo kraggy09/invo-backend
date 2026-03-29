@@ -570,8 +570,47 @@ export const getBillsSummary = async (req: Request, res: Response) => {
         },
         {
           $group: {
-            _id: "$paymentIn",
-            totalAmount: { $sum: "$amount" },
+            _id: null,
+            totalPaymentIn: {
+              $sum: {
+                $cond: [
+                  {
+                    $or: [
+                      { $eq: ["$paymentIn", true] },
+                      {
+                        $and: [
+                          { $eq: [{ $ifNull: ["$paymentIn", null] }, null] },
+                          { $eq: ["$taken", false] },
+                        ],
+                      },
+                    ],
+                  },
+                  "$amount",
+                  0,
+                ],
+              },
+            },
+            totalPaymentOut: {
+              $sum: {
+                $cond: [
+                  {
+                    $not: [{
+                      $or: [
+                        { $eq: ["$paymentIn", true] },
+                        {
+                          $and: [
+                            { $eq: [{ $ifNull: ["$paymentIn", null] }, null] },
+                            { $eq: ["$taken", false] },
+                          ],
+                        },
+                      ],
+                    }],
+                  },
+                  "$amount",
+                  0,
+                ],
+              },
+            },
           },
         },
       ]).option({ allowDiskUse: true }),
@@ -602,18 +641,11 @@ export const getBillsSummary = async (req: Request, res: Response) => {
       profit:
         (billStats[0]?.totalBillAmount || 0) -
         (billStats[0]?.totalInvestment || 0),
-      totalPaymentIn: 0,
-      totalPaymentOut: 0,
+      totalPaymentIn: transactionStats[0]?.totalPaymentIn || 0,
+      totalPaymentOut: transactionStats[0]?.totalPaymentOut || 0,
       peakHour: "N/A",
     };
 
-    transactionStats.forEach((t) => {
-      if (t._id === true) {
-        result.totalPaymentIn = t.totalAmount;
-      } else {
-        result.totalPaymentOut = t.totalAmount;
-      }
-    });
 
     if (peakHourAgg.length > 0) {
       const hour = peakHourAgg[0]._id;
