@@ -6,85 +6,103 @@ import { IReturnBill } from "../types/returnBill.type";
 const IST = "Asia/Kolkata";
 
 const returnBillSchema = new Schema<IReturnBill>(
-    {
-        id: {
-            type: Number,
-            required: true,
-            unique: true,
-        },
-        date: {
-            type: Date,
-            default: () => moment.tz(getCurrentDateAndTime(), IST),
-        },
-        originalBill: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: "Bill",
-            required: true,
-        },
-        customer: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: "Customer",
-            required: true,
-        },
-        createdBy: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: "User",
-            required: true,
-        },
-        items: [
-            {
-                product: {
-                    type: mongoose.Schema.Types.ObjectId,
-                    ref: "Product",
-                    required: true,
-                },
-                quantityReturned: {
-                    type: Number,
-                    required: true,
-                },
-                returnPrice: {
-                    type: Number,
-                    required: true,
-                },
-                returnTotal: {
-                    type: Number,
-                    required: true,
-                },
-                originalType: {
-                    type: String,
-                    required: true,
-                    enum: ["WHOLESALE", "RETAIL", "SUPERWHOLESALE"],
-                },
-            },
-        ],
-        totalAmount: {
-            type: Number,
-            required: true,
-        },
-        paymentMode: {
-            type: String,
-            required: true,
-            enum: ["ADJUSTMENT", "CASH"],
-        },
-        productsTotal: {
-            type: Number,
-        },
-        previousOutstanding: {
-            type: Number,
-        },
-        newOutstanding: {
-            type: Number,
-        },
-        idempotencyKey: {
-            type: String,
-            unique: true,
-            sparse: true,
-        },
+  {
+    shopId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shop",
+      required: true,
+      index: true,
     },
-    { timestamps: true }
+    id: {
+      type: Number,
+      required: true,
+      // No longer globally unique — compound index below
+    },
+    date: {
+      type: Date,
+      default: () => moment.tz(getCurrentDateAndTime(), IST),
+    },
+    originalBill: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Bill",
+      required: true,
+    },
+    customer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Customer",
+      required: true,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    items: [
+      {
+        product: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Product",
+          required: true,
+        },
+        quantityReturned: {
+          type: Number,
+          required: true,
+        },
+        returnPrice: {
+          type: Number,
+          required: true,
+        },
+        returnTotal: {
+          type: Number,
+          required: true,
+        },
+        originalType: {
+          type: String,
+          required: true,
+          enum: ["WHOLESALE", "RETAIL", "SUPERWHOLESALE"],
+        },
+      },
+    ],
+    totalAmount: {
+      type: Number,
+      required: true,
+    },
+    paymentMode: {
+      type: String,
+      required: true,
+      enum: ["ADJUSTMENT", "CASH"],
+    },
+    productsTotal: {
+      type: Number,
+    },
+    previousOutstanding: {
+      type: Number,
+    },
+    newOutstanding: {
+      type: Number,
+    },
+    idempotencyKey: {
+      type: String,
+      sparse: true,
+      // No longer globally unique — compound index below
+    },
+  },
+  { timestamps: true },
 );
 
-returnBillSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 60 * 60 });
+// TTL index
+// returnBillSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 60 * 60 });
+
+// Compound unique indexes for multi-tenancy
+returnBillSchema.index({ shopId: 1, id: 1 }, { unique: true });
+returnBillSchema.index({ shopId: 1, originalBill: 1 });
+returnBillSchema.index(
+  { shopId: 1, idempotencyKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { idempotencyKey: { $type: "string" } },
+  },
+);
 
 const ReturnBill = mongoose.model("ReturnBill", returnBillSchema);
 

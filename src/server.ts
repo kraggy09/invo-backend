@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import app from "./app";
 import http from "http";
 import configureSocketIO from "./config/socket.config";
@@ -6,7 +9,9 @@ import connection from "./db/dbConfig";
 import { initJourneyWorker } from "./workers/journeyWorker";
 
 const PORT = process.env.PORT || 3000;
-const url = process.env.MONGO_URI as string;
+const url = (process.env.MONGO_URI ||
+  process.env.MONGODB_URI ||
+  "mongodb://localhost:27017/invosync") as string;
 
 const server = http.createServer(app);
 server.listen(PORT, async () => {
@@ -21,7 +26,6 @@ server.listen(PORT, async () => {
     setupSocketHandlers(io);
     initJourneyWorker(io);
   } catch (error) {
-
     console.error("❌ Error configuring Socket.IO:", error);
   }
 });

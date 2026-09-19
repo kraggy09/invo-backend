@@ -9,6 +9,7 @@ export interface IReturnItem extends Document {
 }
 
 export interface IReturnBill extends Document {
+    shopId?: mongoose.Types.ObjectId;
     id: number;
     date: Date;
     originalBill: mongoose.Types.ObjectId | string;

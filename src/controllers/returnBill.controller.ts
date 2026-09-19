@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { Response } from "express";
 import mongoose, { ClientSession } from "mongoose";
 import ReturnBill from "../models/returnBill.model";
 import Bill from "../models/bill.model";
@@ -10,31 +10,35 @@ import ApiResponse from "../utils/ApiResponse";
 import { ApiError, getCurrentDateAndTime } from "../utils";
 import Stock from "../models/stock.model";
 import moment from "moment-timezone";
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 
 const IST = "Asia/Kolkata";
 import { EVENTS_MAP } from "../constant/redisMap";
 import { journeyQueue } from "../queues/journeyQueue";
+import { scopedMatch } from "../utils/scopedMatch";
 
 // Helper function to extract logged-in user ID
 const getUserId = (req: any) => {
     return req.user ? req.user._id : "65be87db40026e6f47700000"; // Fallback
 };
 
-export const createReturnBill = async (req: Request, res: Response) => {
+export const createReturnBill = async (req: AuthenticatedRequest, res: Response) => {
+    const shopId = req.shopId!;
     const { originalBillId, customerId, items, paymentMode, totalAmount, idempotencyKey } = req.body;
 
     if (idempotencyKey) {
-        const existingReturnBill = await ReturnBill.findOne({ idempotencyKey })
+        const existingReturnBill = await ReturnBill.findOne({ shopId, idempotencyKey })
             .populate("customer")
             .populate("createdBy", "name username")
             .populate("items.product");
 
         if (existingReturnBill) {
             const transaction = await Transaction.findOne({
+                shopId,
                 idempotencyKey
             }).sort({ createdAt: -1 });
 
-            const stockLogs = await Stock.find({ returnBill: existingReturnBill._id })
+            const stockLogs = await Stock.find({ shopId, returnBill: existingReturnBill._id })
                 .populate("product", "name stock")
                 .populate("createdBy", "name username");
 
@@ -52,19 +56,19 @@ export const createReturnBill = async (req: Request, res: Response) => {
 
     try {
         const result = await session.withTransaction(async () => {
-            // 1. Validations
-            const originalBill = await Bill.findById(originalBillId).session(session);
+            // 1. Validations — IDOR prevention: all lookups scoped to shopId
+            const originalBill = await Bill.findOne({ _id: originalBillId, shopId }).session(session);
             if (!originalBill) throw new ApiError(404, "Original Bill not found");
 
             if (originalBill.customer?.toString() !== customerId) {
                 throw new ApiError(400, "Customer mismatch with Original Bill");
             }
 
-            const customer = await Customer.findById(customerId).session(session);
+            const customer = await Customer.findOne({ _id: customerId, shopId }).session(session);
             if (!customer) throw new ApiError(404, "Customer not found");
 
-            // Verify item quantities against original bill
-            const existingReturns = await ReturnBill.find({ originalBill: originalBillId }).session(session);
+            // Verify item quantities against original bill — SCOPED
+            const existingReturns = await ReturnBill.find({ shopId, originalBill: originalBillId }).session(session);
 
             const returnedItemQuantities = new Map<string, number>();
             existingReturns.forEach((rb) => {
@@ -85,7 +89,8 @@ export const createReturnBill = async (req: Request, res: Response) => {
             const stockLogOps: any[] = [];
             const productIds = items.map((i: any) => new mongoose.Types.ObjectId(i.product));
 
-            const availableProducts = await Product.find({ _id: { $in: productIds } }, { stock: 1 }).session(session);
+            // Products must also belong to this shop
+            const availableProducts = await Product.find({ _id: { $in: productIds }, shopId }, { stock: 1 }).session(session);
             const productMap = new Map<string, any>();
             availableProducts.forEach((p: any) => productMap.set(p._id.toString(), p));
 
@@ -105,20 +110,20 @@ export const createReturnBill = async (req: Request, res: Response) => {
 
                 calculatedTotal += item.returnTotal;
 
-                // Stock Update
+                // Stock Update — also includes shopId filter
                 productBulkOps.push({
                     updateOne: {
-                        filter: { _id: new mongoose.Types.ObjectId(item.product) },
+                        filter: { _id: new mongoose.Types.ObjectId(item.product), shopId },
                         update: { $inc: { stock: item.quantityReturned } },
                     },
                 });
 
-                // Prepare Stock Request for logging
                 const p = productMap.get(pIdStr);
                 const oldStock = p.stock || 0;
                 stockLogOps.push({
                     insertOne: {
                         document: {
+                            shopId,
                             approvedBy: createdBy,
                             product: new mongoose.Types.ObjectId(item.product),
                             oldStock: oldStock,
@@ -126,6 +131,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                             quantity: item.quantityReturned,
                             newStock: oldStock + item.quantityReturned,
                             approved: true,
+                            rejected: false,
                             purpose: "PRODUCT_RETURN",
                             createdBy: createdBy,
                             date: moment.tz(getCurrentDateAndTime(), IST),
@@ -134,14 +140,13 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 });
             }
 
-            // Check total against client passed total
             if (Math.abs(calculatedTotal - totalAmount) > 1) {
                 throw new ApiError(400, `Total Amount mismatch. Calculated: ${calculatedTotal}, Provided: ${totalAmount}`);
             }
 
-            // 2. Generate new ID
+            // 2. Generate new ID — SCOPED to this shop
             const newReturnBillIdCounter = await Counter.findOneAndUpdate(
-                { name: "returnBillId" },
+                { shopId, name: "returnBillId" },
                 { $inc: { value: 1 } },
                 { new: true, upsert: true, session }
             );
@@ -150,28 +155,27 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 throw new ApiError(500, "Error generating Return Bill ID");
             }
 
-            // 3. Create ReturnBill
+            // 3. Create ReturnBill with shopId
             const [newReturnBill] = await ReturnBill.create(
                 [
                     {
+                        shopId,
                         id: newReturnBillIdCounter.value,
                         originalBill: originalBillId,
                         customer: customerId,
                         createdBy: createdBy,
                         items,
                         totalAmount: calculatedTotal,
-                        productsTotal: calculatedTotal, // Using calculatedTotal as the productsTotal for the return
-                        previousOutstanding: customer.outstanding, // Capture snapshot of outstanding before modification
+                        productsTotal: calculatedTotal,
+                        previousOutstanding: customer.outstanding,
                         paymentMode,
                         idempotencyKey,
-                        // newOutstanding will be set after payment logic if ADJUSTMENT mode
                     },
                 ],
                 { session }
             );
 
             if (productBulkOps.length > 0) {
-                // Update stockLogOps with the new returnBill ID
                 stockLogOps.forEach((op: any) => {
                     if (op.insertOne && op.insertOne.document) {
                         op.insertOne.document.returnBill = newReturnBill._id;
@@ -190,7 +194,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
             }
 
             // Fetch created stock logs to send back
-            const stockLogs = await Stock.find({ returnBill: newReturnBill._id })
+            const stockLogs = await Stock.find({ shopId, returnBill: newReturnBill._id })
                 .populate("product", "name stock")
                 .populate("createdBy", "name username")
                 .session(session);
@@ -201,12 +205,12 @@ export const createReturnBill = async (req: Request, res: Response) => {
 
             if (paymentMode === "ADJUSTMENT") {
                 newOutstanding = customer.outstanding - calculatedTotal;
-                await Customer.findByIdAndUpdate(customerId, { outstanding: newOutstanding }, { session });
+                await Customer.findOneAndUpdate({ _id: customerId, shopId }, { outstanding: newOutstanding }, { session });
                 newReturnBill.newOutstanding = newOutstanding;
                 await newReturnBill.save({ session });
 
                 const transCounter = await Counter.findOneAndUpdate(
-                    { name: "transactionId" },
+                    { shopId, name: "transactionId" },
                     { $inc: { value: 1 } },
                     { new: true, session }
                 );
@@ -216,6 +220,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 const [createdTransaction] = await Transaction.create(
                     [
                         {
+                            shopId,
                             id: transCounter.value,
                             name: customer.name,
                             purpose: "PRODUCT_RETURN",
@@ -237,7 +242,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 newReturnBill.newOutstanding = customer.outstanding;
                 await newReturnBill.save({ session });
                 const transCounter = await Counter.findOneAndUpdate(
-                    { name: "transactionId" },
+                    { shopId, name: "transactionId" },
                     { $inc: { value: 1 } },
                     { new: true, session }
                 );
@@ -247,6 +252,7 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 const [createdTransaction] = await Transaction.create(
                     [
                         {
+                            shopId,
                             id: transCounter.value,
                             name: customer.name,
                             purpose: "PRODUCT_RETURN",
@@ -274,15 +280,15 @@ export const createReturnBill = async (req: Request, res: Response) => {
             };
         });
 
-        const populatedRB = await ReturnBill.findById(result.returnBill._id)
+        const populatedRB = await ReturnBill.findOne({ _id: result.returnBill._id, shopId })
             .populate("customer")
             .populate("createdBy", "name username")
             .populate("items.product");
 
-        // Socket Emit
+        // Socket Emit — SCOPED to shop room
         const io = req.app.get("io");
         if (io) {
-            io.emit(EVENTS_MAP.RETURN_BILL_CREATED, {
+            io.to(`shop:${shopId}`).emit(EVENTS_MAP.RETURN_BILL_CREATED, {
                 returnBill: populatedRB,
                 transaction: result.transaction,
                 stockLogs: result.stockLogs,
@@ -290,12 +296,12 @@ export const createReturnBill = async (req: Request, res: Response) => {
                 socketId: req.headers.socketid
             });
 
-            // Additionally emit INVENTORY_UPDATE_REQUEST to update inventory request views
-            io.emit("INVENTORY_UPDATE_REQUEST", result.stockLogs);
+            io.to(`shop:${shopId}`).emit("INVENTORY_UPDATE_REQUEST", result.stockLogs);
         }
 
-        // Journey Log (Offload to background queue)
+        // Journey Log — includes shopId in payload
         journeyQueue.add("return-bill-created", {
+            shopId: shopId.toString(),
             journeyLog: {
                 eventType: "PRODUCT_RETURN",
                 message: `Return Bill #${populatedRB?.id} created for ${(populatedRB?.customer as any)?.name || "Customer"}. Total Returned: ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
@@ -340,11 +346,12 @@ export const createReturnBill = async (req: Request, res: Response) => {
     }
 };
 
-export const getAllReturnBills = async (req: Request, res: Response) => {
+export const getAllReturnBills = async (req: AuthenticatedRequest, res: Response) => {
     try {
+        const shopId = req.shopId!;
         const { startDate, endDate, page = 1, limit = 10 } = req.query;
 
-        let query: any = {};
+        let query: any = { shopId };
         if (startDate && endDate) {
             const start = moment.tz(startDate as string, IST).startOf("day").toDate();
             const end = moment.tz(endDate as string, IST).endOf("day").toDate();
@@ -377,8 +384,9 @@ export const getAllReturnBills = async (req: Request, res: Response) => {
     }
 };
 
-export const getReturnBillsSummary = async (req: Request, res: Response) => {
+export const getReturnBillsSummary = async (req: AuthenticatedRequest, res: Response) => {
     try {
+        const shopId = req.shopId!;
         const { startDate, endDate } = req.query;
 
         if (!startDate || !endDate) {
@@ -394,11 +402,9 @@ export const getReturnBillsSummary = async (req: Request, res: Response) => {
         const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
         const returnStats = await ReturnBill.aggregate([
-            {
-                $match: {
-                    createdAt: { $gte: start, $lte: end },
-                },
-            },
+            scopedMatch(shopId, {
+                createdAt: { $gte: start, $lte: end },
+            }),
             {
                 $group: {
                     _id: null,
@@ -421,10 +427,12 @@ export const getReturnBillsSummary = async (req: Request, res: Response) => {
     }
 };
 
-export const getReturnBillById = async (req: Request, res: Response) => {
+export const getReturnBillById = async (req: AuthenticatedRequest, res: Response) => {
     try {
+        const shopId = req.shopId!;
         const { id } = req.params;
-        const returnBill = await ReturnBill.findById(id)
+        // IDOR prevention: must belong to this shop
+        const returnBill = await ReturnBill.findOne({ _id: id, shopId })
             .populate("customer")
             .populate("createdBy", "name username")
             .populate("originalBill")

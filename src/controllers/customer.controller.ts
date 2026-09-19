@@ -1,5 +1,5 @@
 import Customer from "../models/customer.model";
-import { Request, Response } from "express";
+import { Response } from "express";
 import ApiResponse from "../utils/ApiResponse";
 import Bill from "../models/bill.model";
 import ReturnBill from "../models/returnBill.model";
@@ -10,16 +10,18 @@ import mongoose from "mongoose";
 import { journeyQueue } from "../queues/journeyQueue";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import moment from "moment-timezone";
+import { scopedMatch } from "../utils/scopedMatch";
 
 const IST = "Asia/Kolkata";
 
-export const createNewCustomer = async (req: Request, res: Response) => {
+export const createNewCustomer = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const customerData = req.body;
     let { name, outstanding, phone, idempotencyKey } = customerData;
 
     if (idempotencyKey) {
-      const existingCustomer = await Customer.findOne({ idempotencyKey });
+      const existingCustomer = await Customer.findOne({ shopId, idempotencyKey });
       if (existingCustomer) {
         return ApiResponse(res, 200, true, "Customer already exists (Idempotent)", {
           customer: existingCustomer,
@@ -34,12 +36,14 @@ export const createNewCustomer = async (req: Request, res: Response) => {
 
     name = name.toLowerCase().trim();
 
-    const customer = await Customer.findOne({ $or: [{ name }, { phone }] });
+    // Uniqueness check is SCOPED PER SHOP
+    const customer = await Customer.findOne({ shopId, $or: [{ name }, { phone }] });
 
     if (customer) {
       return ApiResponse(res, 404, false, "Customer already exists");
     }
     const newCustomer = await Customer.create({
+      shopId,
       name,
       outstanding,
       phone,
@@ -48,14 +52,15 @@ export const createNewCustomer = async (req: Request, res: Response) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.CUSTOMER_CREATED, newCustomer);
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.CUSTOMER_CREATED, newCustomer);
     }
 
     journeyQueue.add("customer-created", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "CUSTOMER_CREATED",
         message: `Customer ${newCustomer.name} created`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         entityType: "Customer",
         entityId: newCustomer._id,
         metadata: { phone: newCustomer.phone, outstanding: newCustomer.outstanding }
@@ -70,9 +75,10 @@ export const createNewCustomer = async (req: Request, res: Response) => {
   }
 };
 
-export const getAllCustomers = async (req: Request, res: Response) => {
+export const getAllCustomers = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const customers = await Customer.find();
+    const shopId = req.shopId!;
+    const customers = await Customer.find({ shopId });
 
     if (customers && customers.length > 0) {
       return ApiResponse(res, 200, true, "List of customers", { customers });
@@ -85,17 +91,19 @@ export const getAllCustomers = async (req: Request, res: Response) => {
 };
 
 export const getSingleCustomer = async (req: AuthenticatedRequest, res: Response) => {
-  const customerId = req.params.id; // Access the customer ID from the route parameter
+  const shopId = req.shopId!;
+  const customerId = req.params.id;
 
   const user = req.user
   if (!user) {
     return ApiResponse(res, 404, false, "Unable to find the User")
   }
 
-  const userRoles = user.roles
-  const hasJourneyLogsAccess = userRoles?.some((role) => ["SUPER_ADMIN", "ADMIN", "CREATOR"].includes(role))
+  const userRoles = req.shopMember?.roles || [];
+  const hasJourneyLogsAccess = userRoles.some((role) => ["SUPER_ADMIN", "ADMIN", "CREATOR"].includes(role))
   try {
-    const customer = await Customer.findById(customerId);
+    // IDOR prevention: must belong to this shop
+    const customer = await Customer.findOne({ _id: customerId, shopId });
     if (!customer) {
       return ApiResponse(res, 404, false, "Customer not found");
     }
@@ -103,19 +111,20 @@ export const getSingleCustomer = async (req: AuthenticatedRequest, res: Response
     // Only fetch RECENT records for the initial load to prevent crashes
     const recentLimit = 20;
 
-    const bills = await Bill.find({ customer: customerId })
+    const bills = await Bill.find({ shopId, customer: customerId })
       .populate("createdBy", "name email")
       .sort({ createdAt: -1 })
       .limit(recentLimit)
       .lean();
 
-    const returnBills = await ReturnBill.find({ customer: customerId })
+    const returnBills = await ReturnBill.find({ shopId, customer: customerId })
       .populate("createdBy", "name email")
       .sort({ createdAt: -1 })
       .limit(recentLimit)
       .lean();
 
     const transactions = await Transaction.find({
+      shopId,
       customer: customerId,
       approved: true,
     })
@@ -125,19 +134,19 @@ export const getSingleCustomer = async (req: AuthenticatedRequest, res: Response
 
     let journeys: any[] = [];
     if (hasJourneyLogsAccess) {
-      journeys = await CustomerJourney.find({ customer: customerId })
+      journeys = await CustomerJourney.find({ shopId, customer: customerId })
         .populate("user", "name username")
         .sort({ createdAt: -1 })
         .limit(recentLimit)
         .lean();
     }
 
-    const totalBills = await Bill.countDocuments({ customer: customerId });
-    const totalReturnBills = await ReturnBill.countDocuments({ customer: customerId });
-    const totalTransactions = await Transaction.countDocuments({ customer: customerId, approved: true });
+    const totalBills = await Bill.countDocuments({ shopId, customer: customerId });
+    const totalReturnBills = await ReturnBill.countDocuments({ shopId, customer: customerId });
+    const totalTransactions = await Transaction.countDocuments({ shopId, customer: customerId, approved: true });
     let totalJourneys = 0;
     if (hasJourneyLogsAccess) {
-      totalJourneys = await CustomerJourney.countDocuments({ customer: customerId });
+      totalJourneys = await CustomerJourney.countDocuments({ shopId, customer: customerId });
     }
 
     const newCustomer = {
@@ -161,9 +170,10 @@ export const getSingleCustomer = async (req: AuthenticatedRequest, res: Response
   }
 };
 
-export const getCustomerAnalytics = async (req: Request, res: Response) => {
+export const getCustomerAnalytics = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const customerId = req.params.id;
+    const shopId = req.shopId!;
+    const customerId = req.params.id as string;
     let days = parseInt(req.query.days as string) || 7;
 
     // Validate days ranges
@@ -174,14 +184,12 @@ export const getCustomerAnalytics = async (req: Request, res: Response) => {
     const endDate = moment.tz(IST).endOf("day").toDate();
     const startDate = moment.tz(IST).subtract(days - 1, "days").startOf("day").toDate();
 
-    // 1. Fetch Bills for Sales & Profit
+    // 1. Fetch Bills for Sales & Profit — scoped to this shop
     const billsAgg = await Bill.aggregate([
-      {
-        $match: {
-          customer: new mongoose.Types.ObjectId(customerId),
-          createdAt: { $gte: startDate, $lte: endDate }
-        }
-      },
+      scopedMatch(shopId, {
+        customer: new mongoose.Types.ObjectId(customerId),
+        createdAt: { $gte: startDate, $lte: endDate }
+      }),
       {
         $unwind: "$items"
       },
@@ -212,19 +220,17 @@ export const getCustomerAnalytics = async (req: Request, res: Response) => {
       { $sort: { date: 1 } }
     ]);
 
-    // 2. Fetch Transactions for Payments
+    // 2. Fetch Transactions for Payments — scoped to this shop
     const txAgg = await Transaction.aggregate([
-      {
-        $match: {
-          customer: new mongoose.Types.ObjectId(customerId),
-          createdAt: { $gte: startDate, $lte: endDate },
-          approved: true,      // Confirmed only
-          $or: [
-            { paymentIn: true },
-            { paymentIn: { $exists: false }, taken: false } // Legacy support
-          ]
-        }
-      },
+      scopedMatch(shopId, {
+        customer: new mongoose.Types.ObjectId(customerId),
+        createdAt: { $gte: startDate, $lte: endDate },
+        approved: true,
+        $or: [
+          { paymentIn: true },
+          { paymentIn: { $exists: false }, taken: false } // Legacy support
+        ]
+      }),
       {
         $group: {
           _id: {
@@ -288,9 +294,10 @@ export const getCustomerAnalytics = async (req: Request, res: Response) => {
   }
 };
 
-export const getCustomerHistory = async (req: Request, res: Response) => {
+export const getCustomerHistory = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const customerId = req.params.id;
+    const shopId = req.shopId!;
+    const customerId = req.params.id as string;
     const { startDate, endDate } = req.query;
 
     if (!startDate || !endDate) {
@@ -300,7 +307,7 @@ export const getCustomerHistory = async (req: Request, res: Response) => {
     const start = moment.tz(startDate as string, IST).startOf("day").toDate();
     const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
-    const customer = await Customer.findById(customerId);
+    const customer = await Customer.findOne({ _id: customerId, shopId });
     if (!customer) {
       return ApiResponse(res, 404, false, "Customer not found");
     }
@@ -315,21 +322,21 @@ export const getCustomerHistory = async (req: Request, res: Response) => {
     ] = await Promise.all([
       // Aggregates for Opening Balance (pre-start)
       Bill.aggregate([
-        { $match: { customer: new mongoose.Types.ObjectId(customerId), createdAt: { $lt: start } } },
+        scopedMatch(shopId, { customer: new mongoose.Types.ObjectId(customerId), createdAt: { $lt: start } }),
         { $group: { _id: null, totalChange: { $sum: { $subtract: [{ $subtract: ["$productsTotal", { $ifNull: ["$discount", 0] }] }, "$payment"] } } } }
       ]),
       Transaction.aggregate([
-        { $match: { customer: new mongoose.Types.ObjectId(customerId), approved: true, createdAt: { $lt: start } } },
+        scopedMatch(shopId, { customer: new mongoose.Types.ObjectId(customerId), approved: true, createdAt: { $lt: start } }),
         { $group: { _id: null, totalChange: { $sum: { $cond: ["$paymentIn", { $multiply: ["$amount", -1] }, "$amount"] } } } }
       ]),
       ReturnBill.aggregate([
-        { $match: { customer: new mongoose.Types.ObjectId(customerId), paymentMode: 'ADJUSTMENT', createdAt: { $lt: start } } },
+        scopedMatch(shopId, { customer: new mongoose.Types.ObjectId(customerId), paymentMode: 'ADJUSTMENT', createdAt: { $lt: start } }),
         { $group: { _id: null, totalChange: { $sum: "$totalAmount" } } }
       ]),
       // Actual records within range
-      Bill.find({ customer: customerId, createdAt: { $gte: start, $lte: end } }).lean(),
-      Transaction.find({ customer: customerId, approved: true, createdAt: { $gte: start, $lte: end } }).lean(),
-      ReturnBill.find({ customer: customerId, createdAt: { $gte: start, $lte: end } }).lean()
+      Bill.find({ shopId, customer: customerId, createdAt: { $gte: start, $lte: end } }).lean(),
+      Transaction.find({ shopId, customer: customerId, approved: true, createdAt: { $gte: start, $lte: end } }).lean(),
+      ReturnBill.find({ shopId, customer: customerId, createdAt: { $gte: start, $lte: end } }).lean()
     ]);
 
     // 2. Calculate Opening Balance
@@ -347,7 +354,6 @@ export const getCustomerHistory = async (req: Request, res: Response) => {
           amount: (b.productsTotal || 0) - (b.discount || 0),
           payment: b.payment,
           netChange,
-          // For Bills, 'total' is the new outstanding. Previous is calculated.
           previousBalance: b.total - netChange,
           newBalance: b.total,
           description: `Bill #${b.id}`,
@@ -406,21 +412,23 @@ export const getCustomerHistory = async (req: Request, res: Response) => {
     return ApiResponse(res, 500, false, "Internal Server Error", error.message);
   }
 };
-export const getCustomerBills = async (req: Request, res: Response) => {
+
+export const getCustomerBills = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const customerId = req.params.id;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
 
-    const bills = await Bill.find({ customer: customerId })
+    const bills = await Bill.find({ shopId, customer: customerId })
       .populate("createdBy", "name email")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const total = await Bill.countDocuments({ customer: customerId });
+    const total = await Bill.countDocuments({ shopId, customer: customerId });
 
     return ApiResponse(res, 200, true, "Customer bills retrieved", {
       bills,
@@ -431,20 +439,21 @@ export const getCustomerBills = async (req: Request, res: Response) => {
   }
 };
 
-export const getCustomerTransactions = async (req: Request, res: Response) => {
+export const getCustomerTransactions = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const customerId = req.params.id;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
 
-    const transactions = await Transaction.find({ customer: customerId, approved: true })
+    const transactions = await Transaction.find({ shopId, customer: customerId, approved: true })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const total = await Transaction.countDocuments({ customer: customerId, approved: true });
+    const total = await Transaction.countDocuments({ shopId, customer: customerId, approved: true });
 
     return ApiResponse(res, 200, true, "Customer transactions retrieved", {
       transactions,
@@ -455,21 +464,22 @@ export const getCustomerTransactions = async (req: Request, res: Response) => {
   }
 };
 
-export const getCustomerReturns = async (req: Request, res: Response) => {
+export const getCustomerReturns = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const customerId = req.params.id;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
 
-    const returnBills = await ReturnBill.find({ customer: customerId })
+    const returnBills = await ReturnBill.find({ shopId, customer: customerId })
       .populate("createdBy", "name email")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const total = await ReturnBill.countDocuments({ customer: customerId });
+    const total = await ReturnBill.countDocuments({ shopId, customer: customerId });
 
     return ApiResponse(res, 200, true, "Customer return bills retrieved", {
       returnBills,
@@ -482,24 +492,26 @@ export const getCustomerReturns = async (req: Request, res: Response) => {
 
 export const getCustomerJourneys = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const customerId = req.params.id;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
 
     const user = req.user;
-    if (!user || !user.roles?.some((role) => ["SUPER_ADMIN", "ADMIN", "CREATOR"].includes(role))) {
+    const roles = req.shopMember?.roles || [];
+    if (!user || !roles.some((role) => ["SUPER_ADMIN", "ADMIN", "CREATOR"].includes(role))) {
       return ApiResponse(res, 403, false, "Unauthorized access to journey logs");
     }
 
-    const journeys = await CustomerJourney.find({ customer: customerId })
+    const journeys = await CustomerJourney.find({ shopId, customer: customerId })
       .populate("user", "name username")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const total = await CustomerJourney.countDocuments({ customer: customerId });
+    const total = await CustomerJourney.countDocuments({ shopId, customer: customerId });
 
     return ApiResponse(res, 200, true, "Customer journeys retrieved", {
       journeys,

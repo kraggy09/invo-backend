@@ -3,6 +3,12 @@ import { IJourneyLog } from "../types/journeyLog.type";
 
 const journeyLogSchema = new Schema<IJourneyLog>(
     {
+        shopId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Shop",
+            required: true,
+            index: true,
+        },
         event: {
             type: String,
             required: true,
@@ -29,10 +35,10 @@ const journeyLogSchema = new Schema<IJourneyLog>(
     { timestamps: true }
 );
 
-// Optional: Add indexes for faster querying
-journeyLogSchema.index({ createdAt: -1 });
-journeyLogSchema.index({ event: 1 });
-journeyLogSchema.index({ entityType: 1, entityId: 1 });
+// Compound indexes for multi-tenancy
+journeyLogSchema.index({ shopId: 1, createdAt: -1 });
+journeyLogSchema.index({ shopId: 1, event: 1 });
+journeyLogSchema.index({ shopId: 1, entityType: 1, entityId: 1 });
 
 const JourneyLog = mongoose.model("JourneyLog", journeyLogSchema);
 

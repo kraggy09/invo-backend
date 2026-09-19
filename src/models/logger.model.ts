@@ -4,6 +4,12 @@ import { ILogger } from "../types/logger.type";
 
 let loggerSchema = new Schema<ILogger>(
   {
+    shopId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shop",
+      required: true,
+      index: true,
+    },
     name: {
       type: String,
       required: true,
@@ -30,6 +36,10 @@ let loggerSchema = new Schema<ILogger>(
   },
   { timestamps: true }
 );
+
+// Compound indexes for multi-tenancy
+loggerSchema.index({ shopId: 1, product: 1 });
+loggerSchema.index({ shopId: 1, createdAt: -1 });
 
 let Logger = mongoose.model("Logger", loggerSchema);
 

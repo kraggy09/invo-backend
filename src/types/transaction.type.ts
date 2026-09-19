@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from "mongoose";
 
 export interface ITransaction extends Document {
+  shopId?: Schema.Types.ObjectId;
   id: number;
   date?: string;
   previousOutstanding?: number;

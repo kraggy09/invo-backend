@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from "mongoose";
 
 export interface INotification extends Document {
+    shopId: mongoose.Types.ObjectId;
     name: string;
     description: string;
     isCustomer: boolean;
@@ -9,6 +10,12 @@ export interface INotification extends Document {
 }
 
 const notificationSchema = new Schema<INotification>({
+    shopId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Shop",
+        required: true,
+        index: true,
+    },
     name: {
         type: String,
         required: true,
@@ -30,6 +37,10 @@ const notificationSchema = new Schema<INotification>({
         ref: "Category"
     }
 });
+
+// Compound indexes for multi-tenancy
+notificationSchema.index({ shopId: 1 });
+notificationSchema.index({ shopId: 1, customerId: 1 });
 
 const Notification = mongoose.model("Notification", notificationSchema);
 

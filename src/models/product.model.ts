@@ -2,6 +2,12 @@ import mongoose, { Schema } from "mongoose";
 import { IProduct } from "../types/product.type";
 
 const productSchema = new Schema<IProduct>({
+  shopId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Shop",
+    required: true,
+    index: true,
+  },
   name: {
     type: String,
     required: true,
@@ -21,7 +27,8 @@ const productSchema = new Schema<IProduct>({
   },
   category: {
     type: String,
-    required: true,
+    default: null,
+    required: false,
   },
   retailPrice: {
     type: Number,
@@ -29,11 +36,13 @@ const productSchema = new Schema<IProduct>({
   },
   wholesalePrice: {
     type: Number,
-    required: true,
+    default: 0,
+    required: false,
   },
   superWholesalePrice: {
     type: Number,
-    required: true,
+    default: 0,
+    required: false,
   },
   barcode: [
     {
@@ -47,11 +56,13 @@ const productSchema = new Schema<IProduct>({
   },
   packet: {
     type: Number,
-    required: true,
+    default: 0,
+    required: false,
   },
   box: {
     type: Number,
-    required: true,
+    default: 0,
+    required: false,
   },
   minQuantity: {
     type: Number,
@@ -62,20 +73,34 @@ const productSchema = new Schema<IProduct>({
   },
   idempotencyKey: {
     type: String,
-    unique: true,
     sparse: true,
+    // No longer globally unique — compound index below
   },
 }, { timestamps: true });
 
 productSchema.virtual("totalPackets").get(function () {
+  if (!this.packet || this.packet <= 0) return 0;
   return Math.floor(this.stock / this.packet);
 });
 
 productSchema.virtual("totalStock").get(function () {
+  if (!this.box || this.box <= 0) return this.stock;
   const box = Math.floor(this.stock / this.box);
   const remainingItem = this.stock % this.box;
-  return box + remainingItem; // You were missing the return statement
+  return box + remainingItem;
 });
+
+// Compound indexes for multi-tenancy
+productSchema.index({ shopId: 1, name: 1 });
+productSchema.index({ shopId: 1, category: 1 });
+productSchema.index(
+  { shopId: 1, idempotencyKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { idempotencyKey: { $type: "string" } },
+  }
+);
+productSchema.index({ shopId: 1, barcode: 1 });
 
 const Product = mongoose.model("Product", productSchema);
 

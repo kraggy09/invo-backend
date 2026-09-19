@@ -1,6 +1,7 @@
 import { Document, Types } from "mongoose";
 
 export interface IJourneyLog extends Document {
+    shopId?: Types.ObjectId;
     event: string;
     description: string;
     user: Types.ObjectId;

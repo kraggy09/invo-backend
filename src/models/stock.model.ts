@@ -8,6 +8,12 @@ const IST = "Asia/Kolkata";
 
 const stockSchema = new Schema<IStock>(
   {
+    shopId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shop",
+      required: true,
+      index: true,
+    },
     date: {
       type: Date,
       default: () => moment.tz(getCurrentDateAndTime(), IST),
@@ -63,10 +69,17 @@ const stockSchema = new Schema<IStock>(
       ref: "ReturnBill",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-stockSchema.index({ createdAt: 1 }, { expireAfterSeconds: 5284000 });
+// TTL index
+// stockSchema.index({ createdAt: 1 }, { expireAfterSeconds: 5284000 });
+
+// Compound indexes for multi-tenancy
+stockSchema.index({ shopId: 1, product: 1 });
+stockSchema.index({ shopId: 1, date: -1 });
+stockSchema.index({ shopId: 1, approved: 1 });
+
 const Stock = mongoose.model("Stock", stockSchema);
 
 export default Stock;
