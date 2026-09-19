@@ -68,7 +68,7 @@ const billSchema = new Schema<IBill>(
         },
         productSnapshot: {
           type: Object,
-          reuired: true,
+          required: true,
         },
       },
     ],
