@@ -24,7 +24,7 @@ dotenv.config();
 dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
 const MONGODB_URI =
-  process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/invosync";
+  process.env.MONGO_URI || "mongodb://127.0.0.1:27017/invosync";
 
 // The founding shop details — this is the original single shop
 const FOUNDING_SHOP = {
