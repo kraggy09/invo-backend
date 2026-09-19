@@ -1,15 +1,19 @@
 import axios from "axios";
-import { Request, Response } from "express";
+import { Response } from "express";
 import Product from "../models/product.model";
+import Shop from "../models/shop.model";
 import ApiResponse from "../utils/ApiResponse";
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 
 import { EVENTS_MAP } from "../constant/redisMap";
 import { journeyQueue } from "../queues/journeyQueue";
 
 const IST = "Asia/Kolkata"; // Update with the correct path
 
-export const createNewProduct = async (req: Request, res: Response) => {
+export const createNewProduct = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
+
     let {
       name,
       category,
@@ -28,32 +32,46 @@ export const createNewProduct = async (req: Request, res: Response) => {
     } = req.body;
 
     if (idempotencyKey) {
-      const existingProduct = await Product.findOne({ idempotencyKey });
+      const existingProduct = await Product.findOne({ shopId, idempotencyKey });
       if (existingProduct) {
         return ApiResponse(res, 200, true, `Product already exists (Idempotent)`, {
           product: existingProduct,
         });
       }
     }
-    const requiredFields = [
-      "name",
-      "category",
-      "barcode",
-      "mrp",
-      "costPrice",
-      "retailPrice",
-      "wholesalePrice",
-      "superWholesalePrice",
-      "measuring",
-      "stock",
-      "packet",
-      "box",
-      "minQuantity",
-    ];
+
+    const shop = await Shop.findById(shopId).select("settings");
+    const isRetailOnly = shop?.settings?.pricingMode === "RETAIL_ONLY";
+
+    const requiredFields = isRetailOnly
+      ? [
+          "name",
+          "barcode",
+          "mrp",
+          "costPrice",
+          "retailPrice",
+          "measuring",
+          "stock",
+          "minQuantity",
+        ]
+      : [
+          "name",
+          "barcode",
+          "mrp",
+          "costPrice",
+          "retailPrice",
+          "wholesalePrice",
+          "superWholesalePrice",
+          "measuring",
+          "stock",
+          "packet",
+          "box",
+          "minQuantity",
+        ];
 
     // Check if all required fields are present and sanitized
     const missingFields = requiredFields.filter(
-      (field) => !req.body[field] || req.body[field].toString().trim() === ""
+      (field) => req.body[field] === undefined || req.body[field] === null || req.body[field].toString().trim() === ""
     );
 
     if (missingFields.length > 0) {
@@ -65,9 +83,28 @@ export const createNewProduct = async (req: Request, res: Response) => {
       );
     }
 
-    // Sanitize fields where applicable
-    name = name.trim().toLowerCase();
-    category = category.trim().toLowerCase();
+    if (isRetailOnly) {
+      wholesalePrice =
+        wholesalePrice !== undefined && wholesalePrice !== null && wholesalePrice !== ""
+          ? Number(wholesalePrice)
+          : Number(retailPrice);
+      superWholesalePrice =
+        superWholesalePrice !== undefined && superWholesalePrice !== null && superWholesalePrice !== ""
+          ? Number(superWholesalePrice)
+          : Number(retailPrice);
+      packet = packet !== undefined && packet !== null && packet !== "" ? Number(packet) : 0;
+      box = box !== undefined && box !== null && box !== "" ? Number(box) : 0;
+    }
+
+    // Sanitize category: if empty, "null", or "none", store as null
+    const sanitizedCategory =
+      category &&
+      typeof category === "string" &&
+      category.trim() !== "" &&
+      category.trim().toLowerCase() !== "null" &&
+      category.trim().toLowerCase() !== "none"
+        ? category.trim().toLowerCase()
+        : null;
 
     let newOne;
     const get_base_url = (lang: "hi", word: string) =>
@@ -89,12 +126,15 @@ export const createNewProduct = async (req: Request, res: Response) => {
       barcode = [barcode];
     }
     name = name.toLowerCase();
+
+    // Barcode and name uniqueness is scoped PER SHOP
     const productBarcode = await Product.findOne({
+      shopId,
       barcode: { $in: barcode },
     });
-    const productName = await Product.findOne({ name });
+    const productName = await Product.findOne({ shopId, name });
 
-    // Check if barcode already exists
+    // Check if barcode already exists within this shop
     if (productBarcode) {
       return ApiResponse(
         res,
@@ -107,15 +147,16 @@ export const createNewProduct = async (req: Request, res: Response) => {
       );
     }
 
-    // Check if product name already exists
+    // Check if product name already exists within this shop
     if (productName) {
       return ApiResponse(res, 409, false, `Product already exists`, {
         product: productName,
       });
     }
 
-    // Create new product
+    // Create new product with shopId
     const newProduct = await Product.create({
+      shopId,
       name,
       barcode,
       mrp,
@@ -129,20 +170,21 @@ export const createNewProduct = async (req: Request, res: Response) => {
       box,
       minQuantity,
       hi: newOne ? newOne[0] : name,
-      category,
+      category: sanitizedCategory,
       idempotencyKey,
     });
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.PRODUCT_CREATED, newProduct);
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.PRODUCT_CREATED, newProduct);
     }
 
     journeyQueue.add("product-created", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "PRODUCT_CREATED",
         message: `Product ${newProduct.name} created`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         entityType: "Product",
         entityId: newProduct._id,
         metadata: { mrp: newProduct.mrp, stock: newProduct.stock }
@@ -160,13 +202,14 @@ export const createNewProduct = async (req: Request, res: Response) => {
   }
 };
 
-export const getProduct = async (req: Request, res: Response) => {
+export const getProduct = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const { name, barcode } = req.query;
     const { id } = req.params;
 
     if (id) {
-      const product = await Product.findById(id);
+      const product = await Product.findOne({ _id: id, shopId });
       if (product) {
         return ApiResponse(res, 200, true, "The product is found", {
           product: [product],
@@ -175,7 +218,7 @@ export const getProduct = async (req: Request, res: Response) => {
     }
 
     if (name) {
-      const product = await Product.find({ name });
+      const product = await Product.find({ shopId, name });
       if (product && product.length > 0) {
         return ApiResponse(res, 200, true, "The product is found", {
           product,
@@ -184,7 +227,7 @@ export const getProduct = async (req: Request, res: Response) => {
     }
 
     if (barcode) {
-      const product = await Product.findOne({ barcode });
+      const product = await Product.findOne({ shopId, barcode });
       if (product) {
         return ApiResponse(res, 200, true, "The product is found", {
           data: product,
@@ -198,9 +241,10 @@ export const getProduct = async (req: Request, res: Response) => {
   }
 };
 
-export const getAllproduct = async (req: Request, res: Response) => {
+export const getAllproduct = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const products = await Product.find().sort({ name: 1 });
+    const shopId = req.shopId!;
+    const products = await Product.find({ shopId }).sort({ name: 1 });
 
     return ApiResponse(res, 200, true, "These are the products", {
       products,
@@ -210,8 +254,9 @@ export const getAllproduct = async (req: Request, res: Response) => {
   }
 };
 
-export const updateProductDetails = async (req: Request, res: Response) => {
+export const updateProductDetails = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const product = req.body;
     const { id } = req.params;
     const {
@@ -230,17 +275,29 @@ export const updateProductDetails = async (req: Request, res: Response) => {
       minQuantity,
     } = product;
 
+    const shop = await Shop.findById(shopId).select("settings");
+    const isRetailOnly = shop?.settings?.pricingMode === "RETAIL_ONLY";
+
+    const sanitizedCategory =
+      category &&
+      typeof category === "string" &&
+      category.trim() !== "" &&
+      category.trim().toLowerCase() !== "null" &&
+      category.trim().toLowerCase() !== "none"
+        ? category.trim().toLowerCase()
+        : null;
+
     const updatedData: any = {
       name: name.trim(),
-      category,
+      category: sanitizedCategory,
       mrp,
       costPrice,
       measuring,
       retailPrice,
-      wholesalePrice,
-      superWholesalePrice,
-      packet,
-      box,
+      wholesalePrice: isRetailOnly && (wholesalePrice == null || wholesalePrice === "") ? retailPrice : wholesalePrice,
+      superWholesalePrice: isRetailOnly && (superWholesalePrice == null || superWholesalePrice === "") ? retailPrice : superWholesalePrice,
+      packet: isRetailOnly && (packet == null || packet === "") ? 0 : packet,
+      box: isRetailOnly && (box == null || box === "") ? 0 : box,
       minQuantity,
       barcode,
     };
@@ -249,8 +306,10 @@ export const updateProductDetails = async (req: Request, res: Response) => {
       updatedData.barcode = [barcode];
     }
 
+    // Check barcode conflicts WITHIN this shop only
     const existingProduct = await Product.findOne({
       _id: { $ne: id || productId },
+      shopId,
       barcode: { $in: updatedData.barcode },
     });
 
@@ -266,10 +325,10 @@ export const updateProductDetails = async (req: Request, res: Response) => {
       );
     }
 
-    const previousProduct = await Product.findById(id || productId);
+    const previousProduct = await Product.findOne({ _id: id || productId, shopId });
 
-    const updatedProduct = await Product.findByIdAndUpdate(
-      id || productId,
+    const updatedProduct = await Product.findOneAndUpdate(
+      { _id: id || productId, shopId },
       { $set: updatedData },
       { new: true }
     );
@@ -280,7 +339,7 @@ export const updateProductDetails = async (req: Request, res: Response) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.PRODUCT_UPDATED, updatedProduct);
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.PRODUCT_UPDATED, updatedProduct);
     }
 
     const changes: string[] = [];
@@ -309,12 +368,13 @@ export const updateProductDetails = async (req: Request, res: Response) => {
     }
 
     journeyQueue.add("product-updated", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "PRODUCT_UPDATED",
         message: changes.length > 0
           ? `Product ${updatedProduct.name} updated: ${changes.join(", ")}`
           : `Product ${updatedProduct.name} updated`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         entityType: "Product",
         entityId: updatedProduct._id,
         metadata: {
@@ -334,24 +394,24 @@ export const updateProductDetails = async (req: Request, res: Response) => {
   }
 };
 
-export const deleteProduct = async (req: Request, res: Response) => {
+export const deleteProduct = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const productId = req.params;
-    if (productId) {
-      const deletedProduct = await Product.findByIdAndDelete(
-        productId.id || Object.values(productId)[0]
-      );
+    const shopId = req.shopId!;
+    const { id } = req.params;
+    if (id) {
+      const deletedProduct = await Product.findOneAndDelete({ _id: id, shopId });
       if (deletedProduct) {
         const io = req.app.get("io");
         if (io) {
-          io.emit(EVENTS_MAP.PRODUCT_DELETED, deletedProduct._id);
+          io.to(`shop:${shopId}`).emit(EVENTS_MAP.PRODUCT_DELETED, deletedProduct._id);
         }
 
         journeyQueue.add("product-deleted", {
+          shopId: shopId.toString(),
           journeyLog: {
             eventType: "PRODUCT_DELETED",
             message: `Product ${deletedProduct.name} deleted`,
-            createdBy: (req as any).user?._id || null,
+            createdBy: req.user?._id || null,
             entityType: "Product",
             entityId: deletedProduct._id
           }

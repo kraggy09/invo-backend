@@ -6,7 +6,12 @@
     "start": "node dist/server.js",
     "dev": "ts-node-dev src/server.ts",
     "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dump:local": "ts-node src/scripts/dump-to-local.ts",
+    "migrate:multitenant": "ts-node src/scripts/migrate-to-multitenant.ts",
+    "indexes:create": "ts-node src/scripts/createIndexes.ts",
+    "onboard:shop": "ts-node src/scripts/onboard-shop.ts",
+    "migrate:settings": "ts-node src/scripts/migrate-shop-settings.ts"
   },
   "keywords": [],
   "author": "",

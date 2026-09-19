@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { Response } from "express";
 import Category from "../models/category.model";
 import ApiResponse from "../utils/ApiResponse";
 import { journeyQueue } from "../queues/journeyQueue";
@@ -6,15 +6,25 @@ import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import Product from "../models/product.model";
 
-export const createNewCategory = async (req: Request, res: Response) => {
+export const createNewCategory = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId!;
   let { name, wholesale, superWholeSale } = req.body;
 
+  if (!name || typeof name !== "string" || name.trim() === "") {
+    return ApiResponse(res, 400, false, "Category name is required");
+  }
+
   name = name.toLowerCase().trim();
+  if (name === "null" || name === "nan" || name === "undefined") {
+    return ApiResponse(res, 400, false, "Invalid category name");
+  }
+
   wholesale = Number(wholesale);
   superWholeSale = Number(superWholeSale);
 
   try {
-    let category = await Category.findOne({ name });
+    // Uniqueness check SCOPED to this shop
+    let category = await Category.findOne({ shopId, name });
 
     if (category) {
       if (
@@ -30,16 +40,17 @@ export const createNewCategory = async (req: Request, res: Response) => {
       }
 
       const updatedCategory = await Category.findOneAndUpdate(
-        { name },
+        { shopId, name },
         { $set: { wholesale, superWholeSale } },
-        { new: true } // Return the updated document
+        { new: true }
       );
 
       journeyQueue.add("category-updated", {
+        shopId: shopId.toString(),
         journeyLog: {
           eventType: "CATEGORY_UPDATED",
           message: `Category ${name} was updated`,
-          createdBy: (req as any).user?._id || null,
+          createdBy: req.user?._id || null,
           entityType: "Category",
           entityId: updatedCategory?._id,
           metadata: { wholesale, superWholeSale }
@@ -48,7 +59,7 @@ export const createNewCategory = async (req: Request, res: Response) => {
 
       const io = req.app.get("io");
       if (io) {
-        io.emit(EVENTS_MAP.CATEGORY_UPDATED, updatedCategory);
+        io.to(`shop:${shopId}`).emit(EVENTS_MAP.CATEGORY_UPDATED, updatedCategory);
       }
 
       return ApiResponse(res, 200, true, "Category updated successfully", {
@@ -56,16 +67,18 @@ export const createNewCategory = async (req: Request, res: Response) => {
       });
     } else {
       const newCategory = await Category.create({
+        shopId,
         name,
         wholesale,
         superWholeSale,
       });
 
       journeyQueue.add("category-created", {
+        shopId: shopId.toString(),
         journeyLog: {
           eventType: "CATEGORY_CREATED",
           message: `Category ${name} was created`,
-          createdBy: (req as any).user?._id || null,
+          createdBy: req.user?._id || null,
           entityType: "Category",
           entityId: newCategory._id,
           metadata: { wholesale, superWholeSale }
@@ -74,7 +87,7 @@ export const createNewCategory = async (req: Request, res: Response) => {
 
       const io = req.app.get("io");
       if (io) {
-        io.emit(EVENTS_MAP.CATEGORY_CREATED, newCategory);
+        io.to(`shop:${shopId}`).emit(EVENTS_MAP.CATEGORY_CREATED, newCategory);
       }
 
       return ApiResponse(res, 200, true, "New category created successfully", {
@@ -87,15 +100,14 @@ export const createNewCategory = async (req: Request, res: Response) => {
   }
 };
 
-export const getAllCategories = async (_: Request, res: Response) => {
+export const getAllCategories = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const categories = await Category.find();
+    const shopId = req.shopId!;
+    const categories = await Category.find({ shopId });
 
-    if (!categories || categories.length === 0) {
-      return ApiResponse(res, 404, false, "No categories found");
-    }
-
-    return ApiResponse(res, 200, true, "Categories found", { categories });
+    return ApiResponse(res, 200, true, "Categories found", {
+      categories: categories || [],
+    });
   } catch (error: any) {
     console.error("Error retrieving categories:", error);
     return ApiResponse(res, 500, false, "Server error", error.message);
@@ -103,6 +115,7 @@ export const getAllCategories = async (_: Request, res: Response) => {
 };
 
 export const updateCategory = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId!;
   const { id } = req.params;
   let { name, wholesale, superWholeSale } = req.body;
 
@@ -113,8 +126,9 @@ export const updateCategory = async (req: AuthenticatedRequest, res: Response) =
     if (superWholeSale !== undefined)
       updateData.superWholeSale = Number(superWholeSale);
 
-    const updatedCategory = await Category.findByIdAndUpdate(
-      id,
+    // IDOR prevention: must belong to this shop
+    const updatedCategory = await Category.findOneAndUpdate(
+      { _id: id, shopId },
       { $set: updateData },
       { new: true }
     );
@@ -124,10 +138,11 @@ export const updateCategory = async (req: AuthenticatedRequest, res: Response) =
     }
 
     journeyQueue.add("category-updated", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "CATEGORY_UPDATED",
         message: `Category ${updatedCategory.name} was updated via ${req.user?.name}`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         entityType: "Category",
         entityId: updatedCategory._id,
         metadata: updateData
@@ -136,7 +151,7 @@ export const updateCategory = async (req: AuthenticatedRequest, res: Response) =
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.CATEGORY_UPDATED, updatedCategory);
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.CATEGORY_UPDATED, updatedCategory);
     }
 
     return ApiResponse(res, 200, true, "Category updated successfully", {
@@ -148,17 +163,20 @@ export const updateCategory = async (req: AuthenticatedRequest, res: Response) =
   }
 };
 
-export const deleteCategory = async (req: Request, res: Response) => {
+export const deleteCategory = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId!;
   const { id } = req.params;
 
   try {
-    const category = await Category.findById(id);
+    // IDOR prevention: must belong to this shop
+    const category = await Category.findOne({ _id: id, shopId });
 
     if (!category) {
       return ApiResponse(res, 404, false, "Category not found");
     }
 
-    const products = await Product.find({ category: category.name });
+    // Check products scoped to this shop
+    const products = await Product.find({ shopId, category: category.name });
 
     if (products.length > 0) {
       return ApiResponse(
@@ -170,13 +188,14 @@ export const deleteCategory = async (req: Request, res: Response) => {
       );
     }
 
-    await Category.findByIdAndDelete(id);
+    await Category.findOneAndDelete({ _id: id, shopId });
 
     journeyQueue.add("category-deleted", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "CATEGORY_DELETED",
         message: `Category ${category.name} was deleted`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         entityType: "Category",
         entityId: category._id
       }
@@ -184,7 +203,7 @@ export const deleteCategory = async (req: Request, res: Response) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.CATEGORY_DELETED, category._id);
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.CATEGORY_DELETED, category._id);
     }
 
     return ApiResponse(res, 200, true, "Category deleted successfully");

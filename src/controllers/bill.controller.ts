@@ -10,13 +10,15 @@ import moment from "moment-timezone";
 import { ApiError } from "../utils";
 import { EVENTS_MAP } from "../constant/redisMap";
 import { journeyQueue } from "../queues/journeyQueue";
-
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import { scopedMatch } from "../utils/scopedMatch";
 
 import { getNotificationRules } from "./notification.controller";
 import billEvents, { BILL_EVENTS } from "../events/bill.events";
 const IST = "Asia/Kolkata"; // Update with the correct path
 
-export const createBill = async (req: Request, res: Response) => {
+export const createBill = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId;
   const products = req.body.products;
   const {
     customerId,
@@ -32,12 +34,13 @@ export const createBill = async (req: Request, res: Response) => {
   const session: ClientSession = await mongoose.startSession();
 
   if (idempotencyKey) {
-    const existingBill = await Bill.findOne({ idempotencyKey })
+    const existingBill = await Bill.findOne({ shopId, idempotencyKey })
       .populate("customer")
       .populate("createdBy", "name username");
 
     if (existingBill) {
       const transaction = await Transaction.findOne({
+        shopId,
         idempotencyKey: idempotencyKey,
         id: { $exists: true },
       }).sort({ createdAt: -1 });
@@ -55,23 +58,25 @@ export const createBill = async (req: Request, res: Response) => {
 
   try {
     // 1. Initial reads in parallel (Outside transaction to reduce lock contention and duration)
-    const productIds = products.map((p: any) => new mongoose.Types.ObjectId(p.id));
+    const productIds = products.map(
+      (p: any) => new mongoose.Types.ObjectId(p.id),
+    );
 
     const [
       previousBillId,
       previousTransactionId,
       customer,
       availableProducts,
-      notificationRules
+      notificationRules,
     ] = await Promise.all([
-      Counter.findOne({ name: "billId" }),
-      Counter.findOne({ name: "transactionId" }),
-      Customer.findById(customerId),
+      Counter.findOne({ shopId, name: "billId" }),
+      Counter.findOne({ shopId, name: "transactionId" }),
+      Customer.findOne({ _id: customerId, shopId }),
       Product.find(
-        { _id: { $in: productIds } },
-        { stock: 1, costPrice: 1, category: 1 }
+        { _id: { $in: productIds }, shopId },
+        { stock: 1, costPrice: 1, category: 1 },
       ),
-      getNotificationRules(customerId)
+      getNotificationRules(customerId, shopId),
     ]);
 
     if (!previousTransactionId || !previousBillId) {
@@ -94,12 +99,14 @@ export const createBill = async (req: Request, res: Response) => {
     });
 
     const result = await session.withTransaction(async () => {
-
       let billTotal = 0;
       const items: any[] = [];
       const productBulkOps: any[] = [];
 
-      const matchingNotifications = new Map<string, { rule: any, items: any[] }>();
+      const matchingNotifications = new Map<
+        string,
+        { rule: any; items: any[] }
+      >();
 
       for (const productInput of products) {
         const quantity =
@@ -113,7 +120,7 @@ export const createBill = async (req: Request, res: Response) => {
         if (!product) {
           throw new ApiError(
             404,
-            `Product not found: ${productInput.name || productIdStr}`
+            `Product not found: ${productInput.name || productIdStr}`,
           );
         }
 
@@ -122,11 +129,10 @@ export const createBill = async (req: Request, res: Response) => {
         // Update stock
         productBulkOps.push({
           updateOne: {
-            filter: { _id: product._id },
+            filter: { _id: product._id, shopId },
             update: { $inc: { stock: -quantity } },
           },
         });
-
 
         items.push({
           costPrice: product.costPrice,
@@ -141,7 +147,9 @@ export const createBill = async (req: Request, res: Response) => {
         });
 
         // Single-pass notification check
-        const productCategory = (product.category || productInput.category)?.toLowerCase();
+        const productCategory = (
+          product.category || productInput.category
+        )?.toLowerCase();
         if (productCategory) {
           for (const rule of notificationRules) {
             const ruleCategory = (rule.category as any)?.name?.toLowerCase();
@@ -152,7 +160,7 @@ export const createBill = async (req: Request, res: Response) => {
               }
               matchingNotifications.get(ruleId)!.items.push({
                 productSnapshot: productInput,
-                quantity
+                quantity,
               });
             }
           }
@@ -165,24 +173,24 @@ export const createBill = async (req: Request, res: Response) => {
         throw new ApiError(500, "Product stock update mismatch");
       }
 
-
       const netTotal = Math.ceil(billTotal + customer.outstanding - discount);
 
-      // Increment Bill ID counter
+      // Increment Bill ID counter — SCOPED to this shop
       const newBillId = await Counter.findOneAndUpdate(
-        { name: "billId" },
+        { shopId, name: "billId" },
         { $inc: { value: 1 } },
-        { new: true, session }
+        { new: true, session },
       );
 
       if (!newBillId) {
         throw new ApiError(500, "Error while generating new Bill ID");
       }
 
-      // Create the bill
+      // Create the bill with shopId
       const [newBill] = await Bill.create(
         [
           {
+            shopId,
             customer: customerId,
             items,
             productsTotal: billTotal,
@@ -194,7 +202,7 @@ export const createBill = async (req: Request, res: Response) => {
             idempotencyKey,
           },
         ],
-        { session }
+        { session },
       );
 
       if (!newBill) throw new ApiError(500, "Failed to create new bill");
@@ -205,9 +213,9 @@ export const createBill = async (req: Request, res: Response) => {
 
       if (payment > 0) {
         newTransactionCounter = await Counter.findOneAndUpdate(
-          { name: "transactionId" },
+          { shopId, name: "transactionId" },
           { $inc: { value: 1 } },
-          { new: true, session }
+          { new: true, session },
         );
 
         if (!newTransactionCounter) {
@@ -217,6 +225,7 @@ export const createBill = async (req: Request, res: Response) => {
         const [createdTransaction] = await Transaction.create(
           [
             {
+              shopId,
               id: newTransactionCounter.value,
               name: customer.name,
               purpose: "Payment",
@@ -231,7 +240,7 @@ export const createBill = async (req: Request, res: Response) => {
               idempotencyKey,
             },
           ],
-          { session }
+          { session },
         );
 
         if (!createdTransaction) {
@@ -241,10 +250,10 @@ export const createBill = async (req: Request, res: Response) => {
         transaction = createdTransaction;
       }
 
-      const updatedCustomer = await Customer.findByIdAndUpdate(
-        customerId,
+      const updatedCustomer = await Customer.findOneAndUpdate(
+        { _id: customerId, shopId },
         { outstanding: netTotal - payment },
-        { new: true, session }
+        { new: true, session },
       );
 
       if (!updatedCustomer) {
@@ -262,7 +271,7 @@ export const createBill = async (req: Request, res: Response) => {
     });
 
     // Construct populated bill using already-available data (no extra DB call)
-    const user = (req as any).user;
+    const user = req.user;
     const populatedBill = {
       ...result.bill.toObject(),
       customer: result.updatedCustomer,
@@ -271,7 +280,7 @@ export const createBill = async (req: Request, res: Response) => {
         : result.bill.createdBy,
     };
 
-    // Notify with socket.io
+    // Notify with socket.io — SCOPED to this shop's room only
     const data = {
       ...result,
       bill: populatedBill,
@@ -279,10 +288,11 @@ export const createBill = async (req: Request, res: Response) => {
     };
 
     const io = req.app.get("io");
-    io.emit(EVENTS_MAP.BILL_CREATED, data);
+    io.to(`shop:${shopId}`).emit(EVENTS_MAP.BILL_CREATED, data);
 
-    // Offload journeys/logging to background worker
+    // Offload journeys/logging to background worker — includes shopId in payload
     journeyQueue.add("bill-created", {
+      shopId: shopId!.toString(),
       journeyLog: {
         eventType: "BILL_CREATED",
         message: `Bill #${result.billId} created for ${result.updatedCustomer.name} with total ₹${result.bill.productsTotal}`,
@@ -292,27 +302,35 @@ export const createBill = async (req: Request, res: Response) => {
         metadata: {
           itemsCount: populatedBill.items.length,
           paymentReceived: payment,
-          items: populatedBill.items.map((i: any) => ({ product: i.productSnapshot.name, quantity: i.quantity, price: i.price }))
-        }
+          items: populatedBill.items.map((i: any) => ({
+            product: i.productSnapshot.name,
+            quantity: i.quantity,
+            price: i.price,
+          })),
+        },
       },
       customerJourneyLog: {
+        shopId: shopId!.toString(),
         customerId,
         eventType: "BILL_CREATED",
         message: `Bill #${result.billId} created for ₹${result.bill.productsTotal} ${payment > 0 ? `with payment of ₹${payment}` : ""}`,
         createdBy,
         amount: result.bill.productsTotal,
-        adjustments: (result.bill.total - result.bill.productsTotal),
+        adjustments: result.bill.total - result.bill.productsTotal,
         outstanding: result.updatedCustomer.outstanding,
         billId: populatedBill._id,
-        metadata: { paymentReceived: payment, itemsCount: populatedBill.items.length }
-      }
+        metadata: {
+          paymentReceived: payment,
+          itemsCount: populatedBill.items.length,
+        },
+      },
     });
-
 
     // Emit event for background processing (notifications, etc.)
     billEvents.emit(BILL_EVENTS.BILL_CREATED, {
       bill: populatedBill,
-      matchingNotifications: (result as any).matchingNotifications
+      shopId,
+      matchingNotifications: (result as any).matchingNotifications,
     });
 
     return ApiResponse(res, 201, true, "Bill created successfully", {
@@ -329,15 +347,19 @@ export const createBill = async (req: Request, res: Response) => {
   }
 };
 
-export const getBillDetails = async (req: Request, res: Response) => {
+export const getBillDetails = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
-    const id = req.params.id;
+    const shopId = req.shopId!;
+    const id = req.params.id as string;
 
     const isObjectId = /^[0-9a-fA-F]{24}$/.test(id);
     let bill;
 
     if (isObjectId) {
-      bill = await Bill.findById(id)
+      bill = await Bill.findOne({ _id: id, shopId })
         .populate("items.product")
         .populate("customer")
         .populate("createdBy", "name username");
@@ -346,7 +368,7 @@ export const getBillDetails = async (req: Request, res: Response) => {
       if (isNaN(numericId)) {
         return ApiResponse(res, 400, false, "Invalid bill ID format");
       }
-      bill = await Bill.findOne({ id: numericId })
+      bill = await Bill.findOne({ shopId, id: numericId })
         .populate("items.product")
         .populate("customer")
         .populate("createdBy", "name username");
@@ -362,9 +384,13 @@ export const getBillDetails = async (req: Request, res: Response) => {
   }
 };
 
-export const getLatestBillId = async (req: Request, res: Response) => {
+export const getLatestBillId = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
-    const latestBill = await Counter.findOne({ name: "billId" });
+    const shopId = req.shopId!;
+    const latestBill = await Counter.findOne({ shopId, name: "billId" });
     if (latestBill) {
       const billId = latestBill.value;
       return ApiResponse(res, 200, true, "Latest Bill id", { billId });
@@ -377,9 +403,10 @@ export const getLatestBillId = async (req: Request, res: Response) => {
 };
 
 export async function getBillsByProductNameAndDate(
-  req: Request,
-  res: Response
+  req: AuthenticatedRequest,
+  res: Response,
 ) {
+  const shopId = req.shopId!;
   const { product, startDate, endDate, page = 1, limit = 20 } = req.body;
 
   const barcode = product.barcode.map((code: any) => parseInt(code));
@@ -390,13 +417,21 @@ export async function getBillsByProductNameAndDate(
     const skip = (Number(page) - 1) * Number(limit);
     const limitNum = Number(limit);
 
-    // Look up the exact product ID so we can do a pure DB find without lookups
-    const matchingProducts = await mongoose.model("Product").find({ barcode: { $in: barcode } }).select("_id").lean();
+    // Look up the exact product ID — scoped to this shop
+    const matchingProducts = await mongoose
+      .model("Product")
+      .find({
+        shopId,
+        barcode: { $in: barcode },
+      })
+      .select("_id")
+      .lean();
     const productIds = matchingProducts.map((p: any) => p._id);
 
     const matchQuery = {
+      shopId,
       createdAt: { $gte: startMoment.toDate(), $lte: endMoment.toDate() },
-      "items.product": { $in: productIds }
+      "items.product": { $in: productIds },
     };
 
     // 1) Find the actual paginated bills and populate using fast DB native routines
@@ -408,36 +443,38 @@ export async function getBillsByProductNameAndDate(
         .skip(skip)
         .limit(limitNum)
         .lean(),
-      Bill.countDocuments(matchQuery)
+      Bill.countDocuments(matchQuery),
     ]);
 
-    // Format the bills items array so it ONLY contains the matching products, 
-    // exactly like the previous $unwind and $match pipeline did.
+    // Format the bills items array so it ONLY contains the matching products
     const bills = billsData.map((bill: any) => ({
       ...bill,
       items: bill.items.filter((item: any) =>
-        productIds.some((pid: any) => String(pid) === String(item.product))
-      )
+        productIds.some((pid: any) => String(pid) === String(item.product)),
+      ),
     }));
 
     // 2) Compute the overall total quantity/revenue quickly without deep groupings
     const summaryAgg = await Bill.aggregate([
-      { $match: matchQuery },
+      scopedMatch(shopId, {
+        createdAt: { $gte: startMoment.toDate(), $lte: endMoment.toDate() },
+        "items.product": { $in: productIds },
+      }),
       { $unwind: "$items" },
       { $match: { "items.product": { $in: productIds } } },
       {
         $group: {
           _id: null,
           totalQuantity: { $sum: "$items.quantity" },
-          totalRevenue: { $sum: "$items.total" }
-        }
-      }
+          totalRevenue: { $sum: "$items.total" },
+        },
+      },
     ]);
 
     const summary = {
       totalInstances,
       totalQuantity: summaryAgg[0]?.totalQuantity || 0,
-      totalRevenue: summaryAgg[0]?.totalRevenue || 0
+      totalRevenue: summaryAgg[0]?.totalRevenue || 0,
     };
 
     return ApiResponse(res, 200, true, "Recieved successfully", {
@@ -445,7 +482,7 @@ export async function getBillsByProductNameAndDate(
       total: totalInstances,
       summary,
       page: Number(page),
-      limit: limitNum
+      limit: limitNum,
     });
   } catch (error: any) {
     console.error(error);
@@ -453,20 +490,44 @@ export async function getBillsByProductNameAndDate(
   }
 }
 
-export const getAllBillsInDateRange = async (req: Request, res: Response) => {
+export const getAllBillsInDateRange = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
-    const { startDate, endDate, page = 1, limit = 10, search, minAmount, maxAmount } = req.query;
+    const shopId = req.shopId!;
+    const {
+      startDate,
+      endDate,
+      page = 1,
+      limit = 10,
+      search,
+      minAmount,
+      maxAmount,
+    } = req.query;
 
     if (!startDate || !endDate) {
-      return ApiResponse(res, 400, false, "Both startDate and endDate are required");
+      return ApiResponse(
+        res,
+        400,
+        false,
+        "Both startDate and endDate are required",
+      );
     }
 
-    const start = moment.tz(startDate as string, IST).startOf("day").toDate();
-    const end = moment.tz(endDate as string, IST).endOf("day").toDate();
+    const start = moment
+      .tz(startDate as string, IST)
+      .startOf("day")
+      .toDate();
+    const end = moment
+      .tz(endDate as string, IST)
+      .endOf("day")
+      .toDate();
 
     const skip = (Number(page) - 1) * Number(limit);
 
     let matchQuery: any = {
+      shopId,
       createdAt: {
         $gte: start,
         $lte: end,
@@ -475,8 +536,10 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
 
     if (minAmount !== undefined || maxAmount !== undefined) {
       matchQuery.productsTotal = {};
-      if (minAmount !== undefined) matchQuery.productsTotal.$gte = Number(minAmount);
-      if (maxAmount !== undefined) matchQuery.productsTotal.$lte = Number(maxAmount);
+      if (minAmount !== undefined)
+        matchQuery.productsTotal.$gte = Number(minAmount);
+      if (maxAmount !== undefined)
+        matchQuery.productsTotal.$lte = Number(maxAmount);
     }
 
     if (search) {
@@ -484,17 +547,18 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
       const numSearch = Number(searchStr);
 
       const customerMatch = await Customer.find({
+        shopId,
         $or: [
           { name: { $regex: searchStr, $options: "i" } },
-          { phone: { $regex: searchStr, $options: "i" } }
-        ]
-      }).select("_id").lean();
+          { phone: { $regex: searchStr, $options: "i" } },
+        ],
+      })
+        .select("_id")
+        .lean();
 
-      const customerIds = customerMatch.map(c => c._id);
+      const customerIds = customerMatch.map((c) => c._id);
 
-      const orConditions: any[] = [
-        { customer: { $in: customerIds } }
-      ];
+      const orConditions: any[] = [{ customer: { $in: customerIds } }];
 
       if (!isNaN(numSearch)) {
         orConditions.push({ id: numSearch });
@@ -526,8 +590,12 @@ export const getAllBillsInDateRange = async (req: Request, res: Response) => {
   }
 };
 
-export const getBillsSummary = async (req: Request, res: Response) => {
+export const getBillsSummary = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
+    const shopId = req.shopId!;
     const { startDate, endDate } = req.query;
 
     if (!startDate || !endDate) {
@@ -535,20 +603,22 @@ export const getBillsSummary = async (req: Request, res: Response) => {
         res,
         400,
         false,
-        "Both startDate and endDate are required"
+        "Both startDate and endDate are required",
       );
     }
 
-    const start = moment.tz(startDate as string, IST).startOf("day").toDate();
-    const end = moment.tz(endDate as string, IST).endOf("day").toDate();
+    const start = moment
+      .tz(startDate as string, IST)
+      .startOf("day")
+      .toDate();
+    const end = moment
+      .tz(endDate as string, IST)
+      .endOf("day")
+      .toDate();
 
     const [billStats, transactionStats, peakHourAgg] = await Promise.all([
       Bill.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: start, $lte: end },
-          },
-        },
+        scopedMatch(shopId, { createdAt: { $gte: start, $lte: end } }),
         {
           $unwind: "$items",
         },
@@ -568,12 +638,10 @@ export const getBillsSummary = async (req: Request, res: Response) => {
         },
       ]).option({ allowDiskUse: true }),
       Transaction.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: start, $lte: end },
-            approved: true,
-          },
-        },
+        scopedMatch(shopId, {
+          createdAt: { $gte: start, $lte: end },
+          approved: true,
+        }),
         {
           $group: {
             _id: null,
@@ -600,17 +668,21 @@ export const getBillsSummary = async (req: Request, res: Response) => {
               $sum: {
                 $cond: [
                   {
-                    $not: [{
-                      $or: [
-                        { $eq: ["$paymentIn", true] },
-                        {
-                          $and: [
-                            { $eq: [{ $ifNull: ["$paymentIn", null] }, null] },
-                            { $eq: ["$taken", false] },
-                          ],
-                        },
-                      ],
-                    }],
+                    $not: [
+                      {
+                        $or: [
+                          { $eq: ["$paymentIn", true] },
+                          {
+                            $and: [
+                              {
+                                $eq: [{ $ifNull: ["$paymentIn", null] }, null],
+                              },
+                              { $eq: ["$taken", false] },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
                   },
                   "$amount",
                   0,
@@ -621,11 +693,7 @@ export const getBillsSummary = async (req: Request, res: Response) => {
         },
       ]).option({ allowDiskUse: true }),
       Bill.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: start, $lte: end },
-          },
-        },
+        scopedMatch(shopId, { createdAt: { $gte: start, $lte: end } }),
         {
           $group: {
             _id: { $hour: "$createdAt" },
@@ -652,11 +720,13 @@ export const getBillsSummary = async (req: Request, res: Response) => {
       peakHour: "N/A",
     };
 
-
     if (peakHourAgg.length > 0) {
       const hour = peakHourAgg[0]._id;
       const startHour = moment().hour(hour).minute(0).format("hh A");
-      const endHour = moment().hour(hour + 1).minute(0).format("hh A");
+      const endHour = moment()
+        .hour(hour + 1)
+        .minute(0)
+        .format("hh A");
       result.peakHour = `${startHour} - ${endHour}`;
     }
 

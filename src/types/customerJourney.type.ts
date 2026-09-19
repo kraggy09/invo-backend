@@ -1,6 +1,7 @@
 import { Document, Types } from "mongoose";
 
 export interface ICustomerJourney extends Document {
+    shopId?: Types.ObjectId;
     customer: Types.ObjectId;
     action: string;
     description: string;

@@ -1,19 +1,18 @@
+import dns from "dns";
 import mongoose from "mongoose";
+
+// Force Google & Cloudflare DNS to reliably resolve MongoDB Atlas SRV records
+dns.setServers(["8.8.8.8", "8.8.4.4", "1.1.1.1"]);
 
 const connection = async (url: string) => {
   try {
-    url = String(url);
-    mongoose.connect(url, {
-      family: 4,
-    });
-    const connection = mongoose.connection;
-    connection.on("connected", () => {
-      console.log("MongoDb connected successfully");
-    });
-
-    connection.on("error", (err) => {
+    const conn = mongoose.connection;
+    conn.on("error", (err) => {
       console.log("There was an error while connecting in mongodb", err);
     });
+
+    await mongoose.connect(String(url));
+    console.log("✅ MongoDb connected successfully");
   } catch (error: any) {
     console.log("Something went wrong", error.message);
   }

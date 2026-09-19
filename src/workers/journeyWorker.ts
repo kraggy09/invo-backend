@@ -2,21 +2,23 @@ import { Worker, Job } from "bullmq";
 import redisConnection from "../lib/redis";
 import { addJourneyLog, addCustomerJourneyLog } from "../services/logger.service";
 import { Server } from "socket.io";
+import { Types } from "mongoose";
 
 export const initJourneyWorker = (io: Server) => {
     const worker = new Worker(
         "journey-logs",
         async (job: Job) => {
-            const { journeyLog, customerJourneyLog } = job.data;
+            const { shopId: shopIdStr, journeyLog, customerJourneyLog } = job.data;
 
             console.log(`🌀 Processing background job: ${job.name} (ID: ${job.id})`);
 
-            // Mock request object to provide Socket.IO instance to loggers
-            const mockReq = {
-                app: {
-                    get: (name: string) => (name === "io" ? io : null),
-                },
-            };
+            // Each job MUST carry a shopId — this is the multi-tenant safety guarantee
+            if (!shopIdStr) {
+                console.error(`❌ Job ${job.id} missing shopId! Skipping to prevent cross-tenant contamination.`);
+                return;
+            }
+
+            const shopId = new Types.ObjectId(shopIdStr);
 
             try {
                 const tasks = [];
@@ -24,7 +26,8 @@ export const initJourneyWorker = (io: Server) => {
                 if (journeyLog) {
                     tasks.push(
                         addJourneyLog(
-                            mockReq,
+                            io,
+                            shopId,
                             journeyLog.eventType,
                             journeyLog.message,
                             journeyLog.createdBy,
@@ -38,7 +41,8 @@ export const initJourneyWorker = (io: Server) => {
                 if (customerJourneyLog) {
                     tasks.push(
                         addCustomerJourneyLog(
-                            mockReq,
+                            io,
+                            shopId,
                             customerJourneyLog.customerId,
                             customerJourneyLog.eventType,
                             customerJourneyLog.message,

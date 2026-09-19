@@ -3,6 +3,12 @@ import { ICustomerJourney } from "../types/customerJourney.type";
 
 const customerJourneySchema = new Schema<ICustomerJourney>(
     {
+        shopId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Shop",
+            required: true,
+            index: true,
+        },
         customer: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "Customer",
@@ -43,9 +49,9 @@ const customerJourneySchema = new Schema<ICustomerJourney>(
     { timestamps: true }
 );
 
-// Indexes for faster querying
-customerJourneySchema.index({ customer: 1, createdAt: -1 });
-customerJourneySchema.index({ action: 1 });
+// Compound indexes for multi-tenancy
+customerJourneySchema.index({ shopId: 1, customer: 1, createdAt: -1 });
+customerJourneySchema.index({ shopId: 1, action: 1 });
 
 const CustomerJourney = mongoose.model("CustomerJourney", customerJourneySchema);
 

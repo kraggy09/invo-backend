@@ -1,6 +1,7 @@
 import { Document, Types } from "mongoose";
 
 export interface IStock extends Document {
+  shopId: Types.ObjectId;
   date: Date;
   createdBy: Types.ObjectId;
   actionBy?: Types.ObjectId;

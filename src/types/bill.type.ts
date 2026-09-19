@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { Document } from "mongoose";
+import { Document, Types } from "mongoose";
 
 export interface IItems extends Document {
   previousQuantity: number;
@@ -13,6 +13,7 @@ export interface IItems extends Document {
 }
 
 export interface IBill extends Document {
+  shopId: Types.ObjectId;
   id: number;
   date: Date;
   customer: mongoose.Types.ObjectId | string;

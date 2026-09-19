@@ -8,58 +8,75 @@ import Customer from "../models/customer.model";
 import mongoose from "mongoose";
 import ACL from "../models/acl.model";
 import ACLUser from "../models/aclUser.model";
+import ShopMember from "../models/shopMember.model";
+import Shop from "../models/shop.model";
 import moment from "moment-timezone";
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import { scopedMatch } from "../utils/scopedMatch";
 
 const IST = "Asia/Kolkata";
 
-export const addUserToCompany = async (req: Request, res: Response) => {
+/**
+ * Add a user to the current shop as a member.
+ * Can create a new user account or add an existing user.
+ */
+export const addUserToCompany = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  const shopId = req.shopId;
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const { name, username, password, aclId } = req.body;
-    const user = await User.findOne({ username }).session(session);
-    if (user) {
-      await session.abortTransaction();
-      session.endSession();
-      return ApiResponse(res, 404, false, "User already exists");
+    const { name, username, password, roles = ["WORKER"] } = req.body;
+    let user = await User.findOne({ username }).session(session);
+
+    if (!user) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const newUsers = await User.create(
+        [{ name, username, password: hashedPassword }],
+        { session },
+      );
+
+      if (!newUsers || newUsers.length === 0) {
+        await session.abortTransaction();
+        session.endSession();
+        return ApiResponse(res, 400, false, "Unable to create user");
+      }
+      user = newUsers[0];
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Check if user is already a member of this shop
+    const existingMembership = await ShopMember.findOne({
+      user: user._id,
+      shop: shopId,
+    }).session(session);
 
-    const newUser = await User.create(
-      [
-        {
-          name,
-          username,
-          password: hashedPassword,
-        },
-      ],
-      { session }
-    );
-
-    if (!newUser || newUser.length === 0) {
+    if (existingMembership) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 400, false, "Unable to create user");
-    }
-
-    if (aclId) {
-      await ACLUser.create(
-        [
-          {
-            user: newUser[0]._id,
-            acl: aclId,
-          },
-        ],
-        { session }
+      return ApiResponse(
+        res,
+        409,
+        false,
+        "User is already a member of this shop",
       );
     }
+
+    const shopMember = await ShopMember.create(
+      [{ shop: shopId, user: user._id, roles, isActive: true }],
+      { session },
+    );
 
     await session.commitTransaction();
     session.endSession();
 
-    return ApiResponse(res, 201, true, "User created successfully", {
-      user: newUser[0],
+    const userWithoutPassword = user.toObject();
+    delete (userWithoutPassword as any).password;
+
+    return ApiResponse(res, 201, true, "User added to shop successfully", {
+      user: { ...userWithoutPassword, roles },
+      membership: shopMember[0],
     });
   } catch (error) {
     await session.abortTransaction();
@@ -68,30 +85,25 @@ export const addUserToCompany = async (req: Request, res: Response) => {
   }
 };
 
-export const getAllUsers = async (req: Request, res: Response) => {
+/**
+ * Get all members of the current shop.
+ */
+export const getAllUsers = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const users = await User.find().select("-password").lean();
-    if (!users) {
-      return ApiResponse(res, 400, false, "No users found");
-    }
+    const shopId = req.shopId;
 
-    // Populate roles for each user
-    const usersWithRoles = await Promise.all(
-      users.map(async (user: any) => {
-        const userAclEntries = await ACLUser.find({ user: user._id })
-          .populate("acl", "name")
-          .select("acl")
-          .lean();
-        const roles = userAclEntries
-          .map((entry: any) => entry.acl?.name)
-          .filter(Boolean);
-        return { ...user, roles };
-      })
-    );
+    const members = await ShopMember.find({ shop: shopId })
+      .populate("user", "-password")
+      .lean();
 
-    return ApiResponse(res, 200, true, "Users found", {
-      users: usersWithRoles,
-    });
+    const users = members.map((m: any) => ({
+      ...m.user,
+      roles: m.roles,
+      isActive: m.isActive,
+      membershipId: m._id,
+    }));
+
+    return ApiResponse(res, 200, true, "Users found", { users });
   } catch (error) {
     return ApiResponse(res, 500, false, "Internal Server Error", error);
   }
@@ -106,32 +118,41 @@ export const getAllAclRoles = async (req: Request, res: Response) => {
   }
 };
 
-export const getAdminData = async (req: Request, res: Response) => {
+/**
+ * Admin dashboard data — all aggregations SCOPED to the current shop.
+ */
+export const getAdminData = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
-    let date = new Date();
+    const shopId = req.shopId!;
     let { days } = req.body;
 
-    // Define date ranges
-    const startCurrent = moment.tz(IST).subtract(days, "days").startOf("day").toDate();
+    const startCurrent = moment
+      .tz(IST)
+      .subtract(days, "days")
+      .startOf("day")
+      .toDate();
     const endCurrent = moment.tz(IST).subtract(1, "days").endOf("day").toDate();
 
-    const startPrevious = moment.tz(IST).subtract(days * 2, "days").startOf("day").toDate();
-    const endPrevious = moment.tz(IST).subtract(days + 1, "days").endOf("day").toDate();
+    const startPrevious = moment
+      .tz(IST)
+      .subtract(days * 2, "days")
+      .startOf("day")
+      .toDate();
+    const endPrevious = moment
+      .tz(IST)
+      .subtract(days + 1, "days")
+      .endOf("day")
+      .toDate();
 
     const todayStart = moment.tz(IST).startOf("day").toDate();
     const todayEnd = moment.tz(IST).endOf("day").toDate();
 
-    // Helper function for aggregations
     const aggregateSales = (start: Date, end: Date) => {
       return Bill.aggregate([
-        {
-          $match: {
-            createdAt: {
-              $gte: start,
-              $lte: end,
-            },
-          },
-        },
+        scopedMatch(shopId, { createdAt: { $gte: start, $lte: end } }),
         {
           $addFields: {
             BillTotal: {
@@ -145,70 +166,48 @@ export const getAdminData = async (req: Request, res: Response) => {
         },
         {
           $group: {
-            _id: "", // Group by empty string to get overall total
-            overallSales: {
-              $sum: "$BillTotal",
-            },
-            count: {
-              $sum: 1,
-            },
+            _id: "",
+            overallSales: { $sum: "$BillTotal" },
+            count: { $sum: 1 },
           },
         },
       ]).option({ allowDiskUse: true });
     };
 
-    // Helper function for transaction aggregations
     const aggregateTransactions = (start: Date, end: Date) => {
       return Transaction.aggregate([
-        {
-          $match: {
-            createdAt: {
-              $gte: start,
-              $lte: end,
-            },
-            paymentIn: true,
-          },
-        },
+        scopedMatch(shopId, {
+          createdAt: { $gte: start, $lte: end },
+          paymentIn: true,
+        }),
         {
           $group: {
             _id: "",
-            overallPayment: {
-              $sum: "$amount",
-            },
+            overallPayment: { $sum: "$amount" },
           },
         },
       ]).option({ allowDiskUse: true });
     };
 
-    // Current and Previous Sales Aggregations
     let [totalCurrSales, totalPreviousSales] = await Promise.all([
       aggregateSales(startCurrent, endCurrent),
       aggregateSales(startPrevious, endPrevious),
     ]);
 
-    // Current and Previous Transactions Aggregations
     let [currentTransactions, previousTransaction] = await Promise.all([
       aggregateTransactions(startCurrent, endCurrent),
       aggregateTransactions(startPrevious, endPrevious),
     ]);
 
-    // Daily sales
+    // Daily sales — scoped
     let sales = await Bill.aggregate([
-      {
-        $match: {
-          createdAt: {
-            $gte: startCurrent,
-            $lte: endCurrent,
-          },
-        },
-      },
+      scopedMatch(shopId, {
+        createdAt: { $gte: startCurrent, $lte: endCurrent },
+      }),
       {
         $addFields: {
           dateOnly: {
-            $dateToString: {
-              format: "%m-%d-%Y",
-              date: "$date",
-            },
+            $dateToString: { format: "%m-%d-%Y", date: "$date" },
           },
           BillTotal: {
             $cond: {
@@ -222,84 +221,67 @@ export const getAdminData = async (req: Request, res: Response) => {
       {
         $group: {
           _id: "$dateOnly",
-          totalAmount: {
-            $sum: "$BillTotal",
-          },
+          totalAmount: { $sum: "$BillTotal" },
         },
       },
-      {
-        $sort: {
-          _id: 1,
-        },
-      },
+      { $sort: { _id: 1 } },
     ]).option({ allowDiskUse: true });
 
-    // Daily transactions
+    // Daily transactions — scoped
     let trans = await Transaction.aggregate([
-      {
-        $match: {
-          createdAt: {
-            $gte: startCurrent,
-            $lte: endCurrent,
-          },
-          paymentIn: true,
-        },
-      },
+      scopedMatch(shopId, {
+        createdAt: { $gte: startCurrent, $lte: endCurrent },
+        paymentIn: true,
+      }),
       {
         $group: {
-          _id: {
-            $dateToString: { format: "%m-%d-%Y", date: "$createdAt" },
-          },
+          _id: { $dateToString: { format: "%m-%d-%Y", date: "$createdAt" } },
           totalTrans: { $sum: "$amount" },
           count: { $sum: 1 },
         },
       },
-      {
-        $sort: {
-          _id: 1,
-        },
-      },
+      { $sort: { _id: 1 } },
     ]).option({ allowDiskUse: true });
+
+    // Outstanding — scoped to this shop's customers only
     let outstanding = await Customer.aggregate([
+      scopedMatch(shopId),
       {
         $group: {
           _id: "",
-          cash: {
-            $sum: "$outstanding",
-          },
+          cash: { $sum: "$outstanding" },
         },
       },
     ]).option({ allowDiskUse: true });
 
-    // Payment Status Aggregation
+    // Payment Status Aggregation — scoped
     const paymentStatus = await Bill.aggregate([
+      scopedMatch(shopId),
       {
         $group: {
           _id: "$status",
           count: { $sum: 1 },
           amount: { $sum: "$total" },
-        }
+        },
       },
       {
         $project: {
           status: "$_id",
           count: 1,
           amount: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]).option({ allowDiskUse: true });
 
-    // Optimized Product Statistics Aggregation
+    // Optimized Product Statistics Aggregation — scoped
     const productStatsAgg = await Bill.aggregate([
-      {
-        $match: {
-          $or: [
-            { createdAt: { $gte: startCurrent, $lte: endCurrent } },
-            { createdAt: { $gte: startPrevious, $lte: endPrevious } }
-          ]
-        }
-      },
+      scopedMatch(shopId, {
+        $or: [
+          { createdAt: { $gte: startCurrent, $lte: endCurrent } },
+          { createdAt: { $gte: startPrevious, $lte: endPrevious } },
+        ],
+      }),
       { $unwind: "$items" },
       {
         $group: {
@@ -307,39 +289,67 @@ export const getAdminData = async (req: Request, res: Response) => {
           currentRevenue: {
             $sum: {
               $cond: [
-                { $and: [{ $gte: ["$createdAt", startCurrent] }, { $lte: ["$createdAt", endCurrent] }] },
+                {
+                  $and: [
+                    { $gte: ["$createdAt", startCurrent] },
+                    { $lte: ["$createdAt", endCurrent] },
+                  ],
+                },
                 "$items.total",
-                0
-              ]
-            }
+                0,
+              ],
+            },
           },
           currentSales: {
             $sum: {
               $cond: [
-                { $and: [{ $gte: ["$createdAt", startCurrent] }, { $lte: ["$createdAt", endCurrent] }] },
+                {
+                  $and: [
+                    { $gte: ["$createdAt", startCurrent] },
+                    { $lte: ["$createdAt", endCurrent] },
+                  ],
+                },
                 "$items.quantity",
-                0
-              ]
-            }
+                0,
+              ],
+            },
           },
           previousRevenue: {
             $sum: {
               $cond: [
-                { $and: [{ $gte: ["$createdAt", startPrevious] }, { $lte: ["$createdAt", endPrevious] }] },
+                {
+                  $and: [
+                    { $gte: ["$createdAt", startPrevious] },
+                    { $lte: ["$createdAt", endPrevious] },
+                  ],
+                },
                 "$items.total",
-                0
-              ]
-            }
-          }
-        }
+                0,
+              ],
+            },
+          },
+        },
       },
       {
+        // Pipeline-based $lookup: scope the products join to THIS shop only
         $lookup: {
           from: "products",
-          localField: "_id",
-          foreignField: "_id",
-          as: "productDoc"
-        }
+          let: { productId: "$_id", shopId },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$_id", "$$productId"] },
+                    { $eq: ["$shopId", "$$shopId"] },
+                  ],
+                },
+              },
+            },
+            { $project: { name: 1 } },
+          ],
+          as: "productDoc",
+        },
       },
       { $unwind: { path: "$productDoc", preserveNullAndEmptyArrays: true } },
       {
@@ -350,47 +360,61 @@ export const getAdminData = async (req: Request, res: Response) => {
           change: {
             $let: {
               vars: {
-                diff: { $subtract: ["$currentRevenue", "$previousRevenue"] }
+                diff: { $subtract: ["$currentRevenue", "$previousRevenue"] },
               },
               in: {
                 $cond: {
                   if: { $eq: ["$previousRevenue", 0] },
-                  then: { $cond: [{ $gt: ["$currentRevenue", 0] }, "+100%", "0%"] },
+                  then: {
+                    $cond: [{ $gt: ["$currentRevenue", 0] }, "+100%", "0%"],
+                  },
                   else: {
                     $concat: [
                       { $cond: [{ $gte: ["$$diff", 0] }, "+", ""] },
-                      { $toString: { $round: [{ $multiply: [{ $divide: ["$$diff", "$previousRevenue"] }, 100] }, 1] } },
-                      "%"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        }
+                      {
+                        $toString: {
+                          $round: [
+                            {
+                              $multiply: [
+                                { $divide: ["$$diff", "$previousRevenue"] },
+                                100,
+                              ],
+                            },
+                            1,
+                          ],
+                        },
+                      },
+                      "%",
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       {
         $facet: {
           topProducts: [
             { $match: { revenue: { $gt: 0 } } },
             { $sort: { revenue: -1 } },
-            { $limit: 10 }
+            { $limit: 10 },
           ],
           lowSellingProducts: [
             { $match: { revenue: { $gt: 0 } } },
             { $sort: { revenue: 1 } },
-            { $limit: 5 }
-          ]
-        }
-      }
+            { $limit: 5 },
+          ],
+        },
+      },
     ]).option({ allowDiskUse: true });
 
     const topProducts = productStatsAgg[0].topProducts;
     const lowSellingProducts = productStatsAgg[0].lowSellingProducts;
 
-    // Recent Customers
-    const recentBills = await Bill.find()
-      .populate('customer', 'name')
+    // Recent Customers — scoped
+    const recentBills = await Bill.find({ shopId })
+      .populate("customer", "name")
       .sort({ createdAt: -1 })
       .limit(5)
       .lean();
@@ -399,33 +423,37 @@ export const getAdminData = async (req: Request, res: Response) => {
       name: bill.customer?.name || "Unknown",
       amount: bill.total,
       time: bill.createdAt.toISOString(),
-      type: "Regular" // default
+      type: "Regular",
     }));
 
-    // Customer Stats
-    const totalCustomers = await Customer.countDocuments();
+    // Customer Stats — scoped
+    const totalCustomers = await Customer.countDocuments({ shopId });
     const newCustomers = await Customer.countDocuments({
-      createdAt: { $gte: startCurrent, $lte: endCurrent }
+      shopId,
+      createdAt: { $gte: startCurrent, $lte: endCurrent },
     });
 
-    // Active customers are customers who had a bill in the current period
     const activeCustomersAgg = await Bill.aggregate([
-      { $match: { createdAt: { $gte: startCurrent, $lte: endCurrent } } },
+      scopedMatch(shopId, {
+        createdAt: { $gte: startCurrent, $lte: endCurrent },
+      }),
       { $group: { _id: "$customer" } },
-      { $count: "activeCount" }
+      { $count: "activeCount" },
     ]).option({ allowDiskUse: true });
-    const activeCustomers = activeCustomersAgg.length > 0 ? activeCustomersAgg[0].activeCount : 0;
+    const activeCustomers =
+      activeCustomersAgg.length > 0 ? activeCustomersAgg[0].activeCount : 0;
 
     const quickStats = {
       totalCustomers,
       activeCustomers,
       newCustomers,
-      returningCustomers: activeCustomers - newCustomers > 0 ? activeCustomers - newCustomers : 0
+      returningCustomers:
+        activeCustomers - newCustomers > 0 ? activeCustomers - newCustomers : 0,
     };
 
-    // Daily Summary
+    // Daily Summary — scoped
     const todayBills = await Bill.aggregate([
-      { $match: { createdAt: { $gte: todayStart, $lte: todayEnd } } },
+      scopedMatch(shopId, { createdAt: { $gte: todayStart, $lte: todayEnd } }),
       {
         $addFields: {
           calculatedTotal: {
@@ -441,52 +469,70 @@ export const getAdminData = async (req: Request, res: Response) => {
         $group: {
           _id: { $hour: "$createdAt" },
           totalAmount: { $sum: "$calculatedTotal" },
-          count: { $sum: 1 }
-        }
+          count: { $sum: 1 },
+        },
       },
-      { $sort: { totalAmount: -1 } }
+      { $sort: { totalAmount: -1 } },
     ]).option({ allowDiskUse: true });
 
-    const todaySales = todayBills.reduce((acc, curr) => acc + curr.totalAmount, 0);
+    const todaySales = todayBills.reduce(
+      (acc: number, curr: any) => acc + curr.totalAmount,
+      0,
+    );
     const todayTransactions = await Transaction.countDocuments({
+      shopId,
       createdAt: { $gte: todayStart, $lte: todayEnd },
       paymentIn: true,
     });
-    const averageTicket = todayTransactions > 0 ? Math.round(todaySales / todayTransactions) : 0;
+    const averageTicket =
+      todayTransactions > 0 ? Math.round(todaySales / todayTransactions) : 0;
 
     let peakHour = "N/A";
     if (todayBills.length > 0) {
       const peakHourNum = todayBills[0]._id;
-      peakHour = `${String(peakHourNum).padStart(2, '0')}:00 - ${String(peakHourNum + 1).padStart(2, '0')}:00`;
+      peakHour = `${String(peakHourNum).padStart(2, "0")}:00 - ${String(peakHourNum + 1).padStart(2, "0")}:00`;
     }
 
     const topProductTodayAgg = await Bill.aggregate([
-      { $match: { createdAt: { $gte: todayStart, $lte: todayEnd } } },
+      scopedMatch(shopId, { createdAt: { $gte: todayStart, $lte: todayEnd } }),
       { $unwind: "$items" },
       {
+        // Pipeline-based $lookup: scope the products join to THIS shop only
         $lookup: {
           from: "products",
-          localField: "items.product",
-          foreignField: "_id",
-          as: "productDoc"
-        }
+          let: { productId: "$items.product", shopId },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$_id", "$$productId"] },
+                    { $eq: ["$shopId", "$$shopId"] },
+                  ],
+                },
+              },
+            },
+            { $project: { name: 1 } },
+          ],
+          as: "productDoc",
+        },
       },
       { $unwind: { path: "$productDoc", preserveNullAndEmptyArrays: true } },
       {
         $group: {
           _id: { $ifNull: ["$productDoc.name", "Unknown Product"] },
           sales: { $sum: "$items.quantity" },
-          revenue: { $sum: "$items.total" }
-        }
+          revenue: { $sum: "$items.total" },
+        },
       },
       { $sort: { revenue: -1 } },
-      { $limit: 3 }
+      { $limit: 3 },
     ]).option({ allowDiskUse: true });
 
-    const topProductsToday = topProductTodayAgg.map(p => ({
+    const topProductsToday = topProductTodayAgg.map((p: any) => ({
       name: p._id,
       sales: p.sales,
-      revenue: p.revenue
+      revenue: p.revenue,
     }));
 
     const dailySummary = {
@@ -494,10 +540,9 @@ export const getAdminData = async (req: Request, res: Response) => {
       todayTransactions,
       averageTicket,
       peakHour,
-      topProductsToday
+      topProductsToday,
     };
 
-    // Send the aggregated data as response
     return res.status(200).json({
       totalCurrSales,
       totalPreviousSales,
@@ -511,7 +556,7 @@ export const getAdminData = async (req: Request, res: Response) => {
       lowSellingProducts,
       recentCustomers,
       quickStats,
-      dailySummary
+      dailySummary,
     });
   } catch (error) {
     console.error("Error in getAdminData: ", error);
@@ -519,19 +564,22 @@ export const getAdminData = async (req: Request, res: Response) => {
   }
 };
 
-export const assignRoleToUser = async (req: Request, res: Response) => {
+export const assignRoleToUser = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  const shopId = req.shopId!;
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const { userId, aclId } = req.body;
+    const { userId, roles } = req.body;
 
-    if (!userId || !aclId) {
+    if (!userId || !roles) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 400, false, "User ID and Role ID are required");
+      return ApiResponse(res, 400, false, "User ID and roles are required");
     }
 
-    // Check if user exists
     const user = await User.findById(userId).session(session);
     if (!user) {
       await session.abortTransaction();
@@ -539,29 +587,25 @@ export const assignRoleToUser = async (req: Request, res: Response) => {
       return ApiResponse(res, 404, false, "User not found");
     }
 
-    // Check if role exists
-    const acl = await ACL.findById(aclId).session(session);
-    if (!acl) {
+    // Update ShopMember roles for this shop
+    const membership = await ShopMember.findOneAndUpdate(
+      { user: userId, shop: shopId },
+      { $set: { roles } },
+      { new: true, session },
+    );
+
+    if (!membership) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 404, false, "Role not found");
+      return ApiResponse(res, 404, false, "User is not a member of this shop");
     }
-
-    // Check if user already has this role
-    const existingAclUser = await ACLUser.findOne({ user: userId, acl: aclId }).session(session);
-    if (existingAclUser) {
-      await session.abortTransaction();
-      session.endSession();
-      return ApiResponse(res, 400, false, "User already has this role");
-    }
-
-    // Assign the role
-    await ACLUser.create([{ user: userId, acl: aclId }], { session });
 
     await session.commitTransaction();
     session.endSession();
 
-    return ApiResponse(res, 200, true, "Role assigned successfully");
+    return ApiResponse(res, 200, true, "Role assigned successfully", {
+      membership,
+    });
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
@@ -569,7 +613,8 @@ export const assignRoleToUser = async (req: Request, res: Response) => {
   }
 };
 
-export const deleteUser = async (req: Request, res: Response) => {
+export const deleteUser = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId!;
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
@@ -581,7 +626,6 @@ export const deleteUser = async (req: Request, res: Response) => {
       return ApiResponse(res, 400, false, "User ID is required");
     }
 
-    // Check if user exists
     const user = await User.findById(userId).session(session);
     if (!user) {
       await session.abortTransaction();
@@ -589,29 +633,42 @@ export const deleteUser = async (req: Request, res: Response) => {
       return ApiResponse(res, 404, false, "User not found");
     }
 
-    // Check user roles
-    const userAclEntries = await ACLUser.find({ user: userId })
-      .populate("acl", "name")
-      .session(session);
-
-    const roles = userAclEntries
-      .map((entry: any) => entry.acl?.name)
-      .filter(Boolean);
-
-    if (roles.includes("SUPER_ADMIN") || roles.includes("CREATOR")) {
+    // Find membership for this shop
+    const membership = await ShopMember.findOne({
+      user: userId,
+      shop: shopId,
+    }).session(session);
+    if (!membership) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 403, false, "Cannot delete users with SUPER_ADMIN or CREATOR roles");
+      return ApiResponse(res, 404, false, "User is not a member of this shop");
     }
 
-    // Delete user and their ACL entries
-    await ACLUser.deleteMany({ user: userId }).session(session);
-    await User.findByIdAndDelete(userId).session(session);
+    if (
+      membership.roles.includes("SUPER_ADMIN") ||
+      membership.roles.includes("CREATOR")
+    ) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(
+        res,
+        403,
+        false,
+        "Cannot remove users with SUPER_ADMIN or CREATOR roles",
+      );
+    }
+
+    // Deactivate membership instead of deleting user account (user may belong to other shops)
+    await ShopMember.findOneAndUpdate(
+      { user: userId, shop: shopId },
+      { isActive: false },
+      { session },
+    );
 
     await session.commitTransaction();
     session.endSession();
 
-    return ApiResponse(res, 200, true, "User deleted successfully");
+    return ApiResponse(res, 200, true, "User removed from shop successfully");
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
@@ -619,33 +676,46 @@ export const deleteUser = async (req: Request, res: Response) => {
   }
 };
 
-//Todo: Low Priority (Write an aggreagate function to get the profit of the single customer too)
-
-export const getCustomerData = async (req: Request, res: Response) => {
+/**
+ * Get customer analytics data — SCOPED to current shop.
+ */
+export const getCustomerData = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  const shopId = req.shopId!;
   let { days, customerId } = req.body;
   customerId = new mongoose.Types.ObjectId(customerId);
-  const startCurrent = moment.tz(IST).subtract(days, "days").startOf("day").toDate();
+  const startCurrent = moment
+    .tz(IST)
+    .subtract(days, "days")
+    .startOf("day")
+    .toDate();
   const endCurrent = moment.tz(IST).subtract(1, "days").endOf("day").toDate();
-  const startPrevious = moment.tz(IST).subtract(days * 2, "days").startOf("day").toDate();
-  const endPrevious = moment.tz(IST).subtract(days + 1, "days").endOf("day").toDate();
+  const startPrevious = moment
+    .tz(IST)
+    .subtract(days * 2, "days")
+    .startOf("day")
+    .toDate();
+  const endPrevious = moment
+    .tz(IST)
+    .subtract(days + 1, "days")
+    .endOf("day")
+    .toDate();
 
-  let foundCustomer = await Customer.findOne({ _id: customerId });
+  // IDOR prevention
+  let foundCustomer = await Customer.findOne({ _id: customerId, shopId });
 
   if (!foundCustomer) {
     return ApiResponse(res, 404, false, "Customer not found");
   }
-  // Helper function for aggregations
+
   const aggregateSales = (start: Date, end: Date) => {
     return Bill.aggregate([
-      {
-        $match: {
-          customer: customerId,
-          createdAt: {
-            $gte: start,
-            $lte: end,
-          },
-        },
-      },
+      scopedMatch(shopId, {
+        customer: customerId,
+        createdAt: { $gte: start, $lte: end },
+      }),
       {
         $addFields: {
           BillTotal: {
@@ -659,72 +729,49 @@ export const getCustomerData = async (req: Request, res: Response) => {
       },
       {
         $group: {
-          _id: "", // Group by empty string to get overall total
-          overallSales: {
-            $sum: "$BillTotal",
-          },
-          count: {
-            $sum: 1,
-          },
+          _id: "",
+          overallSales: { $sum: "$BillTotal" },
+          count: { $sum: 1 },
         },
       },
     ]).option({ allowDiskUse: true });
   };
 
-  // Helper function for transaction aggregations
   const aggregateTransactions = (start: Date, end: Date) => {
     return Transaction.aggregate([
-      {
-        $match: {
-          name: foundCustomer.name,
-          createdAt: {
-            $gte: start,
-            $lte: end,
-          },
-          paymentIn: true,
-        },
-      },
+      scopedMatch(shopId, {
+        customer: customerId,
+        createdAt: { $gte: start, $lte: end },
+        paymentIn: true,
+      }),
       {
         $group: {
           _id: "",
-          overallPayment: {
-            $sum: "$amount",
-          },
+          overallPayment: { $sum: "$amount" },
         },
       },
     ]).option({ allowDiskUse: true });
   };
 
-  // Current and Previous Sales Aggregations
   let [totalCurrSales, totalPreviousSales] = await Promise.all([
     aggregateSales(startCurrent, endCurrent),
     aggregateSales(startPrevious, endPrevious),
   ]);
 
-  // Current and Previous Transactions Aggregations
   let [currentTransactions, previousTransaction] = await Promise.all([
     aggregateTransactions(startCurrent, endCurrent),
     aggregateTransactions(startPrevious, endPrevious),
   ]);
 
-  // Daily sales
   let sales = await Bill.aggregate([
-    {
-      $match: {
-        customer: customerId,
-        createdAt: {
-          $gte: startCurrent,
-          $lte: endCurrent,
-        },
-      },
-    },
+    scopedMatch(shopId, {
+      customer: customerId,
+      createdAt: { $gte: startCurrent, $lte: endCurrent },
+    }),
     {
       $addFields: {
         dateOnly: {
-          $dateToString: {
-            format: "%m-%d-%Y",
-            date: "$date",
-          },
+          $dateToString: { format: "%m-%d-%Y", date: "$date" },
         },
         BillTotal: {
           $cond: {
@@ -738,56 +785,28 @@ export const getCustomerData = async (req: Request, res: Response) => {
     {
       $group: {
         _id: "$dateOnly",
-        totalAmount: {
-          $sum: "$BillTotal",
-        },
+        totalAmount: { $sum: "$BillTotal" },
       },
     },
-    {
-      $sort: {
-        _id: 1,
-      },
-    },
+    { $sort: { _id: 1 } },
   ]).option({ allowDiskUse: true });
 
-  // Daily transactions
   let trans = await Transaction.aggregate([
-    {
-      $match: {
-        name: foundCustomer.name,
-        createdAt: {
-          $gte: startCurrent,
-          $lte: endCurrent,
-        },
-        paymentIn: true,
-      },
-    },
+    scopedMatch(shopId, {
+      customer: customerId,
+      createdAt: { $gte: startCurrent, $lte: endCurrent },
+      paymentIn: true,
+    }),
     {
       $group: {
-        _id: {
-          $dateToString: { format: "%m-%d-%Y", date: "$createdAt" },
-        },
+        _id: { $dateToString: { format: "%m-%d-%Y", date: "$createdAt" } },
         totalTrans: { $sum: "$amount" },
         count: { $sum: 1 },
       },
     },
-    {
-      $sort: {
-        _id: 1,
-      },
-    },
+    { $sort: { _id: 1 } },
   ]).option({ allowDiskUse: true });
 
-  console.log({
-    totalCurrSales,
-    totalPreviousSales,
-    currentTransactions,
-    previousTransaction,
-    sales,
-    trans,
-  });
-
-  // Send the aggregated data as response
   return res.status(200).json({
     totalCurrSales,
     totalPreviousSales,

@@ -1,10 +1,12 @@
-import { Request } from "express";
 import JourneyLog from "../models/journeyLog.model";
 import { EVENTS_MAP } from "../constant/redisMap";
 import CustomerJourney from "../models/customerJourney.model";
+import { Types } from "mongoose";
+import { Server } from "socket.io";
 
 export const addJourneyLog = async (
-    req: Request | any,
+    io: Server | null,
+    shopId: Types.ObjectId,
     event: string,
     description: string,
     userId: any,
@@ -14,6 +16,7 @@ export const addJourneyLog = async (
 ) => {
     try {
         const log = await JourneyLog.create({
+            shopId,
             event,
             description,
             user: userId,
@@ -24,9 +27,9 @@ export const addJourneyLog = async (
 
         const populatedLog = await log.populate("user", "name username");
 
-        const io = req?.app?.get("io");
+        // Emit ONLY to the shop's room — not globally
         if (io) {
-            io.emit(EVENTS_MAP.JOURNEY_LOG_CREATED, populatedLog);
+            io.to(`shop:${shopId}`).emit(EVENTS_MAP.JOURNEY_LOG_CREATED, populatedLog);
         }
 
         return log;
@@ -38,7 +41,8 @@ export const addJourneyLog = async (
 };
 
 export const addCustomerJourneyLog = async (
-    req: Request | any,
+    io: Server | null,
+    shopId: Types.ObjectId,
     customer: any,
     action: string,
     description: string,
@@ -56,6 +60,7 @@ export const addCustomerJourneyLog = async (
 
     try {
         const log = await CustomerJourney.create({
+            shopId,
             customer,
             action,
             description,
@@ -69,9 +74,9 @@ export const addCustomerJourneyLog = async (
 
         const populatedLog = await log.populate("user", "name username");
 
-        const io = req?.app?.get("io");
+        // Emit ONLY to the shop's room — not globally
         if (io) {
-            io.emit(EVENTS_MAP.CUSTOMER_JOURNEY_CREATED, populatedLog);
+            io.to(`shop:${shopId}`).emit(EVENTS_MAP.CUSTOMER_JOURNEY_CREATED, populatedLog);
         }
 
         return log;

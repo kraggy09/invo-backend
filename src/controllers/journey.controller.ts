@@ -1,13 +1,16 @@
-import { Request, Response } from "express";
+import { Response } from "express";
 import JourneyLog from "../models/journeyLog.model";
 import { getServerErrorLog } from "../utils";
 import ApiResponse from "../utils/ApiResponse";
+import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 
-export const getJourneyLogs = async (req: Request, res: Response) => {
+export const getJourneyLogs = async (req: AuthenticatedRequest, res: Response) => {
     try {
+        const shopId = req.shopId!;
         const { page = 1, limit = 50, event, entityType, userId, startDate, endDate } = req.query;
 
-        const query: any = {};
+        // All journey logs are SCOPED to the current shop
+        const query: any = { shopId };
         if (event) query.event = event;
         if (entityType) query.entityType = entityType;
         if (userId) query.user = userId;

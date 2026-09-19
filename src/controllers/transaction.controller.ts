@@ -1,22 +1,24 @@
-import { Request, Response } from "express";
+import { Response } from "express";
 import mongoose, { Types } from "mongoose";
 import Counter from "../models/counter.model";
 import ApiResponse from "../utils/ApiResponse";
 import Transaction from "../models/transaction.model";
-import { ApiError, getAclOfAUser, getCurrentDateAndTime } from "../utils";
+import { ApiError, getCurrentDateAndTime } from "../utils";
 import Customer from "../models/customer.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import moment from "moment-timezone";
 import { journeyQueue } from "../queues/journeyQueue";
+import { scopedMatch } from "../utils/scopedMatch";
 
 const IST = "Asia/Kolkata";
 
 export const createNewTransaction = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId!;
   const { name, amount, purpose, transactionId, idempotencyKey } = req.body;
 
   if (idempotencyKey) {
-    const existingTransaction = await Transaction.findOne({ idempotencyKey });
+    const existingTransaction = await Transaction.findOne({ shopId, idempotencyKey });
     if (existingTransaction) {
       return ApiResponse(res, 200, true, "Transaction already exists (Idempotent)", {
         transaction: { newTransaction: existingTransaction },
@@ -29,8 +31,9 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
 
   try {
     const result = await session.withTransaction(async () => {
-      // Check if the transaction ID is valid
+      // Check if the transaction ID is valid — SCOPED to this shop
       const previousTransactionId = await Counter.findOne({
+        shopId,
         name: "transactionId",
       }).session(session);
 
@@ -48,9 +51,9 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
         throw new Error("Duplicate transaction!! Please refresh.");
       }
 
-      // Increment transaction ID
+      // Increment transaction ID — SCOPED to this shop
       const newTransactionId = await Counter.findOneAndUpdate(
-        { name: "transactionId" },
+        { shopId, name: "transactionId" },
         { $inc: { value: 1 } },
         { session, new: true }
       );
@@ -59,10 +62,11 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
         throw new Error("Error generating new transaction ID.");
       }
 
-      // Create the new transaction
+      // Create the new transaction with shopId
       const newTransaction = await Transaction.create(
         [
           {
+            shopId,
             id: newTransactionId.value,
             name,
             amount,
@@ -91,10 +95,11 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
     const io = req.app.get("io");
     if (io && result && (result as any).newTransaction) {
       const transactionToEmit = (result as any).newTransaction;
-      io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
     const journeyData: any = {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "TRANSACTION_CREATED",
         message: `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
@@ -134,11 +139,12 @@ export const createNewTransaction = async (req: AuthenticatedRequest, res: Respo
   }
 };
 
-export const createNewPayment = async (req: Request, res: Response) => {
+export const createNewPayment = async (req: AuthenticatedRequest, res: Response) => {
+  const shopId = req.shopId!;
   let { name, customerId, amount, paymentMode, transactionId, idempotencyKey } = req.body;
 
   if (idempotencyKey) {
-    const existingTransaction = await Transaction.findOne({ idempotencyKey });
+    const existingTransaction = await Transaction.findOne({ shopId, idempotencyKey });
     if (existingTransaction) {
       return ApiResponse(res, 200, true, "Payment already exists (Idempotent)", {
         payment: { newTransaction: existingTransaction },
@@ -155,6 +161,7 @@ export const createNewPayment = async (req: Request, res: Response) => {
       amount = Number(amount);
 
       const previousTransactionId = await Counter.findOne({
+        shopId,
         name: "transactionId",
       }).session(session);
 
@@ -170,8 +177,8 @@ export const createNewPayment = async (req: Request, res: Response) => {
         throw new Error("Duplicate transaction!! Please refresh.");
       }
 
-      // Fetch the customer
-      const customer = await Customer.findById(customerId).session(session);
+      // Fetch the customer — IDOR prevention
+      const customer = await Customer.findOne({ _id: customerId, shopId }).session(session);
       if (!customer) {
         throw new Error("Customer not found");
       }
@@ -180,7 +187,7 @@ export const createNewPayment = async (req: Request, res: Response) => {
       const newOutstanding = previousOutstanding - amount;
 
       let updatedTransactionId = await Counter.findOneAndUpdate(
-        { name: "transactionId" },
+        { shopId, name: "transactionId" },
         {
           $inc: { value: 1 },
         },
@@ -193,10 +200,11 @@ export const createNewPayment = async (req: Request, res: Response) => {
       if (!updatedTransactionId) {
         throw new Error("Error while creating transaction id");
       }
-      // Create the new transaction
+      // Create the new transaction with shopId
       const newTransaction = await Transaction.create(
         [
           {
+            shopId,
             id: updatedTransactionId.value,
             name,
             previousOutstanding,
@@ -226,14 +234,15 @@ export const createNewPayment = async (req: Request, res: Response) => {
     const io = req.app.get("io");
     if (io && result && (result as any).newTransaction) {
       const transactionToEmit = (result as any).newTransaction;
-      io.emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_CREATED, { transaction: transactionToEmit, transactionId: transactionToEmit.id });
     }
 
     journeyQueue.add("payment-created", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "PAYMENT_CREATED",
         message: `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         entityType: "Transaction",
         entityId: (result as any)?.newTransaction?._id,
         metadata: { amount, paymentMode, party: (result as any)?.newTransaction?.name }
@@ -242,7 +251,7 @@ export const createNewPayment = async (req: Request, res: Response) => {
         customerId,
         eventType: "PAYMENT_CREATED",
         message: `Payment #${(result as any)?.newTransaction?.id} of ₹${amount} received`,
-        createdBy: (req as any).user?._id || null,
+        createdBy: req.user?._id || null,
         amount,
         previousOutstanding: (result as any)?.newTransaction?.previousOutstanding,
         outstanding: (result as any)?.newTransaction?.newOutstanding,
@@ -268,6 +277,7 @@ export const approveTransaction = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
+  const shopId = req.shopId!;
   const session = await mongoose.startSession();
   let customer, transaction;
 
@@ -278,13 +288,14 @@ export const approveTransaction = async (
 
   try {
     await session.withTransaction(async () => {
-      transaction = await Transaction.findById(transactionId).session(session);
+      // IDOR prevention: must belong to this shop
+      transaction = await Transaction.findOne({ _id: transactionId, shopId }).session(session);
       if (!transaction) {
         throw new Error("Transaction not found");
       }
 
-      // Fetch the customer associated with the transaction
-      customer = await Customer.findById(transaction.customer).session(session);
+      // Fetch the customer associated with the transaction — also scoped
+      customer = await Customer.findOne({ _id: transaction.customer, shopId }).session(session);
       if (!customer) {
         throw new Error("Customer not found");
       }
@@ -299,8 +310,8 @@ export const approveTransaction = async (
       }
 
       // Update customer's outstanding balance
-      customer = await Customer.findByIdAndUpdate(
-        transaction.customer,
+      customer = await Customer.findOneAndUpdate(
+        { _id: transaction.customer, shopId },
         { $inc: { outstanding: -transaction.amount } },
         { new: true, session }
       );
@@ -314,13 +325,13 @@ export const approveTransaction = async (
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.TRANSACTION_UPDATED, {
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_UPDATED, {
         transaction, customer, purpose: "ACCEPT"
       });
-      // io.emit(EVENTS_MAP.CUSTOMER_UPDATED, customer);
     }
 
     journeyQueue.add("transaction-approved", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "TRANSACTION_APPROVED",
         message: `Transaction #${(transaction as any)?.id} was approved`,
@@ -342,8 +353,6 @@ export const approveTransaction = async (
       }
     });
 
-    // Success response
-
     return ApiResponse(res, 200, true, "Transaction approved successfully", {
       customer,
       transaction,
@@ -357,7 +366,6 @@ export const approveTransaction = async (
 
     return ApiResponse(res, 500, false, error.message || "Server Error");
   } finally {
-    // Ensure the session is ended
     session.endSession();
   }
 };
@@ -366,17 +374,17 @@ export const rejectTransaction = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
+  const shopId = req.shopId!;
   const userId = req.user?.id;
   const transactionId = req.params.id;
 
   try {
-    // Changing from findByIdAndDelete to updating rejected status
-    let transaction = await Transaction.findById(transactionId);
+    // IDOR prevention: must belong to this shop
+    let transaction = await Transaction.findOne({ _id: transactionId, shopId });
     if (!transaction) {
       throw new Error("Transaction not found");
     }
 
-    // Instead of deleting, just mark as rejected with timestamp
     transaction.rejectedAt = moment.tz(getCurrentDateAndTime(), IST).toDate();
     transaction.approvedBy = userId;
     await transaction.save();
@@ -384,12 +392,13 @@ export const rejectTransaction = async (
 
     const io = req.app.get("io");
     if (io) {
-      io.emit(EVENTS_MAP.TRANSACTION_UPDATED, {
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_UPDATED, {
         transaction, purpose: "REJECT"
       });
     }
 
     journeyQueue.add("transaction-rejected", {
+      shopId: shopId.toString(),
       journeyLog: {
         eventType: "TRANSACTION_REJECTED",
         message: `Transaction #${(transaction as any)?.id} was rejected`,
@@ -416,15 +425,16 @@ export const rejectTransaction = async (
   }
 };
 
-export const getAllTransactions = async (req: Request, res: Response) => {
+export const getAllTransactions = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    // Fetch transactions with approved set to false AND not rejected
+    const shopId = req.shopId!;
+    // Fetch pending transactions SCOPED to this shop
     const transactions = await Transaction.find({
+      shopId,
       approved: false,
       rejectedAt: { $exists: false }
     })
 
-    // Return successful response with the transactions
     return ApiResponse(res, 200, true, "Transactions found successfully", {
       transactions,
     });
@@ -438,9 +448,11 @@ export const getAllTransactions = async (req: Request, res: Response) => {
   }
 };
 
-export const getLatestTransactionId = async (req: Request, res: Response) => {
+export const getLatestTransactionId = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const latestTransactionId = await Counter.findOne({
+      shopId,
       name: "transactionId",
     });
 
@@ -464,9 +476,10 @@ export const getLatestTransactionId = async (req: Request, res: Response) => {
 };
 
 export const getAllTransactionsInDateRange = async (
-  req: Request,
+  req: AuthenticatedRequest,
   res: Response
 ) => {
+  const shopId = req.shopId!;
   const { startDate, endDate, page = 1, limit = 10, paymentIn, search, minAmount, maxAmount } = req.query;
 
   if (!startDate || !endDate) {
@@ -482,6 +495,7 @@ export const getAllTransactionsInDateRange = async (
     const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
     const query: any = {
+      shopId,
       createdAt: {
         $gte: start,
         $lte: end,
@@ -546,8 +560,9 @@ export const getAllTransactionsInDateRange = async (
   }
 };
 
-export const getTransactionsSummary = async (req: Request, res: Response) => {
+export const getTransactionsSummary = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const { startDate, endDate } = req.query;
 
     if (!startDate || !endDate) {
@@ -563,12 +578,10 @@ export const getTransactionsSummary = async (req: Request, res: Response) => {
     const end = moment.tz(endDate as string, IST).endOf("day").toDate();
 
     const transactionStats = await Transaction.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: start, $lte: end },
-          approved: true,
-        },
-      },
+      scopedMatch(shopId, {
+        createdAt: { $gte: start, $lte: end },
+        approved: true,
+      }),
       {
         $group: {
           _id: "$paymentIn",
@@ -601,10 +614,12 @@ export const getTransactionsSummary = async (req: Request, res: Response) => {
   }
 };
 
-export const getSingleTransaction = async (req: Request, res: Response) => {
+export const getSingleTransaction = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const shopId = req.shopId!;
     const { id } = req.params;
-    const transaction = await Transaction.findById(id)
+    // IDOR prevention: must belong to this shop
+    const transaction = await Transaction.findOne({ _id: id, shopId })
       .populate("approvedBy", "name username")
       .populate("customer", "name phone");
     if (!transaction) {

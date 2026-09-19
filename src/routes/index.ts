@@ -10,6 +10,7 @@ import adminRouter from "./admin.route";
 import journeyRouter from "./journey.route";
 import returnBillRouter from "./returnBill.route";
 import notificationRouter from "./notification.route";
+import shopRouter from "./shop.route";
 import { verifyToken } from "../services/token.service";
 import { Request, Response } from "express";
 
@@ -38,5 +39,6 @@ rootRouter.use("/categories", categoryRouter);
 rootRouter.use("/admin", adminRouter);
 rootRouter.use("/journey-logs", journeyRouter);
 rootRouter.use("/notifications", notificationRouter);
+rootRouter.use("/shops", shopRouter);
 
 export default rootRouter;
