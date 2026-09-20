@@ -80,11 +80,7 @@ export const getAllCustomers = async (req: AuthenticatedRequest, res: Response) 
     const shopId = req.shopId!;
     const customers = await Customer.find({ shopId });
 
-    if (customers && customers.length > 0) {
-      return ApiResponse(res, 200, true, "List of customers", { customers });
-    }
-
-    return ApiResponse(res, 404, false, "No customers found");
+    return ApiResponse(res, 200, true, "List of customers", { customers: customers || [] });
   } catch (error: any) {
     return ApiResponse(res, 500, false, "Server error", error.message);
   }

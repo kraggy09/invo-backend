@@ -464,10 +464,10 @@ export const getLatestTransactionId = async (req: AuthenticatedRequest, res: Res
 
     return ApiResponse(
       res,
-      404,
-      false,
-      "Transaction Id not found, restart",
-      {}
+      200,
+      true,
+      "Latest Transaction Id",
+      { transactionId: 0 }
     );
   } catch (error: any) {
     console.error("Error retrieving latest Transaction:", error);

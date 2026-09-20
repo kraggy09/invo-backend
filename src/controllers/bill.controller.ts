@@ -395,10 +395,10 @@ export const getLatestBillId = async (
       const billId = latestBill.value;
       return ApiResponse(res, 200, true, "Latest Bill id", { billId });
     }
-    return ApiResponse(res, 404, false, "Bill id not found restart");
+    return ApiResponse(res, 200, true, "Latest Bill id", { billId: 0 });
   } catch (error: any) {
     console.error("Error retrieving latest bill:", error);
-    return ApiResponse(res, 500, false, error.message || "Server erro");
+    return ApiResponse(res, 500, false, error.message || "Server error");
   }
 };
 
