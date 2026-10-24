@@ -9,7 +9,7 @@ export const sendDiscordNotification = async (
   data: any,
   webhookUrl?: string,
 ) => {
-  const url = webhookUrl;
+  const url = webhookUrl || process.env.DISCORD_WEBHOOK_URL;
   if (!url) {
     console.error(
       "No Discord webhook URL configured. Set DISCORD_WEBHOOK_URL or shop.settings.discordWebhookUrl.",
