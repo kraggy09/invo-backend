@@ -1192,7 +1192,7 @@ export const alterBill = async (req: AuthenticatedRequest, res: Response) => {
         shopId,
       }).session(session);
       const dbProductMap = new Map<string, any>();
-      dbProducts.forEach((p) => dbProductMap.set(p._id.toString(), p));
+      dbProducts.forEach((p: any) => dbProductMap.set(String(p._id), p));
 
       let newProductsTotal = 0;
       const newItems: any[] = [];

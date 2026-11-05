@@ -638,7 +638,7 @@ export const updateCustomer = async (req: AuthenticatedRequest, res: Response) =
           },
         },
         customerJourneyLog: {
-          customerId: updatedCustomer._id.toString(),
+          customerId: String((updatedCustomer as any)._id),
           eventType: "CUSTOMER_UPDATED",
           message: "Customer profile updated",
           createdBy: req.user?._id || null,

@@ -547,7 +547,7 @@ export const approveSupplierPurchase = async (
               newOutstanding: newSupplierOutstanding,
               amount: cashPaid,
               taken: true,
-              purpose: `Supplier Purchase #${purchase._id.toString().slice(-6)} Payment`,
+              purpose: `Supplier Purchase #${String((purchase as any)._id).slice(-6)} Payment`,
               approved: true,
               approvedAt: moment.tz(IST).toDate(),
               approvedBy: userId,
