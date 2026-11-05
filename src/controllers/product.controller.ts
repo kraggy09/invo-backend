@@ -2,6 +2,7 @@ import axios from "axios";
 import { Response } from "express";
 import Product from "../models/product.model";
 import Shop from "../models/shop.model";
+import PriceHistory from "../models/priceHistory.model";
 import ApiResponse from "../utils/ApiResponse";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 
@@ -349,6 +350,40 @@ export const updateProductDetails = async (req: AuthenticatedRequest, res: Respo
     };
 
     if (previousProduct) {
+      const prevCp = Number(previousProduct.costPrice) || 0;
+      const prevRetail = Number(previousProduct.retailPrice) || 0;
+      const prevWholesale = Number(previousProduct.wholesalePrice) || 0;
+      const prevSuperWholesale = Number(previousProduct.superWholesalePrice) || 0;
+
+      const newCp = updatedProduct.costPrice !== undefined ? Number(updatedProduct.costPrice) : prevCp;
+      const newRetail = updatedProduct.retailPrice !== undefined ? Number(updatedProduct.retailPrice) : prevRetail;
+      const newWholesale = updatedProduct.wholesalePrice !== undefined ? Number(updatedProduct.wholesalePrice) : prevWholesale;
+      const newSuperWholesale = updatedProduct.superWholesalePrice !== undefined ? Number(updatedProduct.superWholesalePrice) : prevSuperWholesale;
+
+      const hasPriceChanged =
+        prevCp !== newCp ||
+        prevRetail !== newRetail ||
+        prevWholesale !== newWholesale ||
+        prevSuperWholesale !== newSuperWholesale;
+
+      if (hasPriceChanged) {
+        PriceHistory.create({
+          shopId,
+          product: updatedProduct._id,
+          changedAt: new Date(),
+          changedBy: req.user?._id || req.user?.id,
+          source: "MANUAL_EDIT",
+          previousCostPrice: prevCp,
+          newCostPrice: newCp,
+          previousRetailPrice: prevRetail,
+          newRetailPrice: newRetail,
+          previousWholesalePrice: prevWholesale,
+          newWholesalePrice: newWholesale,
+          previousSuperWholesalePrice: prevSuperWholesale,
+          newSuperWholesalePrice: newSuperWholesale,
+        }).catch((err) => console.error("Error creating manual price history:", err));
+      }
+
       Object.keys(updatedData).forEach((key) => {
         const oldValue = (previousProduct as any)[key];
         const newValue = updatedData[key];
@@ -422,6 +457,45 @@ export const deleteProduct = async (req: AuthenticatedRequest, res: Response) =>
 
     return ApiResponse(res, 404, false, "Product not found");
   } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message || "Server error");
+  }
+};
+
+export const getProductPriceHistory = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const shopId = req.shopId!;
+    const { id } = req.params;
+    const { page = 1, limit = 15 } = req.query;
+
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(100, Math.max(1, Number(limit) || 15));
+    const skip = (pageNum - 1) * limitNum;
+
+    const query = { shopId, product: id };
+
+    const [priceHistories, total] = await Promise.all([
+      PriceHistory.find(query)
+        .populate("changedBy", "name username")
+        .populate("supplier", "name")
+        .sort({ changedAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      PriceHistory.countDocuments(query),
+    ]);
+
+    return ApiResponse(res, 200, true, "Price history fetched successfully", {
+      priceHistories,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
+    });
+  } catch (error: any) {
+    console.error("Error fetching price history:", error);
     return ApiResponse(res, 500, false, error.message || "Server error");
   }
 };

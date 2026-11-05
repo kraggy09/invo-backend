@@ -4,5 +4,8 @@ export interface ICustomer extends Document {
   name: string;
   outstanding: number;
   phone: string;
+  address?: string;
   idempotencyKey?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }

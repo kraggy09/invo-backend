@@ -18,7 +18,7 @@ export const createNewCustomer = async (req: AuthenticatedRequest, res: Response
   try {
     const shopId = req.shopId!;
     const customerData = req.body;
-    let { name, outstanding, phone, idempotencyKey } = customerData;
+    let { name, outstanding, phone, address, idempotencyKey } = customerData;
 
     if (idempotencyKey) {
       const existingCustomer = await Customer.findOne({ shopId, idempotencyKey });
@@ -47,6 +47,7 @@ export const createNewCustomer = async (req: AuthenticatedRequest, res: Response
       name,
       outstanding,
       phone,
+      address,
       idempotencyKey,
     });
 
@@ -412,7 +413,7 @@ export const getCustomerHistory = async (req: AuthenticatedRequest, res: Respons
 export const getCustomerBills = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const shopId = req.shopId!;
-    const customerId = req.params.id;
+    const customerId = req.params.id as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
@@ -438,7 +439,7 @@ export const getCustomerBills = async (req: AuthenticatedRequest, res: Response)
 export const getCustomerTransactions = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const shopId = req.shopId!;
-    const customerId = req.params.id;
+    const customerId = req.params.id as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
@@ -463,7 +464,7 @@ export const getCustomerTransactions = async (req: AuthenticatedRequest, res: Re
 export const getCustomerReturns = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const shopId = req.shopId!;
-    const customerId = req.params.id;
+    const customerId = req.params.id as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
@@ -489,7 +490,7 @@ export const getCustomerReturns = async (req: AuthenticatedRequest, res: Respons
 export const getCustomerJourneys = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const shopId = req.shopId!;
-    const customerId = req.params.id;
+    const customerId = req.params.id as string;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 15;
     const skip = (page - 1) * limit;
@@ -515,5 +516,150 @@ export const getCustomerJourneys = async (req: AuthenticatedRequest, res: Respon
     });
   } catch (error: any) {
     return ApiResponse(res, 500, false, error.message);
+  }
+};
+
+
+export const updateCustomer = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const shopId = req.shopId!;
+    const customerId = req.params.id as string;
+
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+      return ApiResponse(res, 400, false, "Invalid customer ID");
+    }
+
+    const { name, address, phone, mobile, mobileNumber } = req.body;
+    const rawPhone = phone !== undefined ? phone : (mobile !== undefined ? mobile : mobileNumber);
+
+    let formattedName: string | undefined;
+    let formattedPhone: string | undefined;
+    let formattedAddress: string | undefined;
+
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return ApiResponse(res, 400, false, "Customer name cannot be empty");
+      }
+      formattedName = name.toLowerCase().trim();
+    }
+
+    if (rawPhone !== undefined) {
+      const phoneStr = String(rawPhone).trim();
+      if (phoneStr.length !== 10 || !/^\d{10}$/.test(phoneStr)) {
+        return ApiResponse(res, 400, false, "Phone number should be of 10 digits");
+      }
+      formattedPhone = phoneStr;
+    }
+
+    if (address !== undefined) {
+      if (typeof address !== "string") {
+        return ApiResponse(res, 400, false, "Address must be a string");
+      }
+      formattedAddress = address.trim();
+    }
+
+    // Strictly ensure at least one editable field was provided
+    if (formattedName === undefined && formattedPhone === undefined && formattedAddress === undefined) {
+      return ApiResponse(
+        res,
+        400,
+        false,
+        "No editable fields provided. Only name, address, and mobile number can be edited."
+      );
+    }
+
+    // IDOR protection & tenant scoping: ensure customer exists and belongs to this shop
+    const existingCustomer = await Customer.findOne({ _id: customerId, shopId });
+    if (!existingCustomer) {
+      return ApiResponse(res, 404, false, "Customer not found");
+    }
+
+    // Check for uniqueness conflict within the same shop
+    const conflictConditions: any[] = [];
+    if (formattedName && formattedName !== existingCustomer.name) {
+      conflictConditions.push({ name: formattedName });
+    }
+    if (formattedPhone && formattedPhone !== existingCustomer.phone) {
+      conflictConditions.push({ phone: formattedPhone });
+    }
+
+    if (conflictConditions.length > 0) {
+      const conflictCustomer = await Customer.findOne({
+        shopId,
+        _id: { $ne: customerId },
+        $or: conflictConditions,
+      });
+
+      if (conflictCustomer) {
+        if (formattedName && conflictCustomer.name === formattedName) {
+          return ApiResponse(res, 409, false, "A customer with this name already exists in this shop");
+        }
+        if (formattedPhone && conflictCustomer.phone === formattedPhone) {
+          return ApiResponse(res, 409, false, "A customer with this phone number already exists in this shop");
+        }
+        return ApiResponse(res, 409, false, "Customer with this name or phone already exists");
+      }
+    }
+
+    // Build update payload strictly containing name, phone, address and NOTHING ELSE
+    const updateData: { name?: string; phone?: string; address?: string } = {};
+    if (formattedName !== undefined) updateData.name = formattedName;
+    if (formattedPhone !== undefined) updateData.phone = formattedPhone;
+    if (formattedAddress !== undefined) updateData.address = formattedAddress;
+
+    const updatedCustomer = await Customer.findOneAndUpdate(
+      { _id: customerId, shopId },
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedCustomer) {
+      return ApiResponse(res, 404, false, "Customer not found");
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.CUSTOMER_UPDATED, updatedCustomer);
+    }
+
+    try {
+      journeyQueue.add("customer-updated", {
+        shopId: shopId.toString(),
+        journeyLog: {
+          eventType: "CUSTOMER_UPDATED",
+          message: `Customer ${updatedCustomer.name} details updated by ${req.user?.name || "Admin"}`,
+          createdBy: req.user?._id || null,
+          entityType: "Customer",
+          entityId: updatedCustomer._id,
+          metadata: {
+            name: updatedCustomer.name,
+            phone: updatedCustomer.phone,
+            address: updatedCustomer.address,
+          },
+        },
+        customerJourneyLog: {
+          customerId: updatedCustomer._id.toString(),
+          eventType: "CUSTOMER_UPDATED",
+          message: "Customer profile updated",
+          createdBy: req.user?._id || null,
+          amount: 0,
+          outstanding: updatedCustomer.outstanding,
+          metadata: {
+            name: updatedCustomer.name,
+            phone: updatedCustomer.phone,
+            address: updatedCustomer.address,
+          },
+        },
+      });
+    } catch (queueErr) {
+      console.error("Failed to enqueue customer-updated log:", queueErr);
+    }
+
+    return ApiResponse(res, 200, true, "Customer details updated successfully", {
+      customer: updatedCustomer,
+    });
+  } catch (error: any) {
+    console.error("Error updating customer:", error);
+    return ApiResponse(res, 500, false, error.message || "Server Error");
   }
 };

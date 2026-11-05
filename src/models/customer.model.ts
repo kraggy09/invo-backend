@@ -22,6 +22,11 @@ const customerSchema = new mongoose.Schema<ICustomer>({
     maxlength: 10,
     required: true,
   },
+  address: {
+    type: String,
+    trim: true,
+    default: "",
+  },
   idempotencyKey: {
     type: String,
     sparse: true,

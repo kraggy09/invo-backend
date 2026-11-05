@@ -57,7 +57,16 @@ const stockSchema = new Schema<IStock>(
     purpose: {
       type: String,
       required: true,
-      enum: ["PRODUCT_RETURN", "STOCK_UPDATE"],
+      enum: [
+        "PRODUCT_RETURN",
+        "STOCK_UPDATE",
+        "SUPPLIER_PURCHASE",
+        "STOCK_RECONCILIATION",
+      ],
+    },
+    reason: {
+      type: String,
+      trim: true,
     },
     rejected: {
       type: Boolean,

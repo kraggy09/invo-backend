@@ -6,6 +6,7 @@ import Stock from "../models/stock.model";
 import ApiResponse from "../utils/ApiResponse";
 import { ApiError, getServerErrorLog } from "../utils";
 import moment from "moment-timezone";
+import { EVENTS_MAP } from "../constant/redisMap";
 
 const IST = "Asia/Kolkata";
 
@@ -236,6 +237,283 @@ export const updateInventoryRequest = async (
     return getServerErrorLog(res, error);
   } finally {
     session.endSession();
+  }
+};
+
+export const reconcileStock = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  const shopId = req.shopId!;
+  const user = req.user;
+  if (!user) {
+    return ApiResponse(res, 401, false, "Unauthorized");
+  }
+  const userId = user.id || user._id;
+  const { items, generalReason } = req.body;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return ApiResponse(
+      res,
+      400,
+      false,
+      "At least one item is required for reconciliation"
+    );
+  }
+
+  for (const item of items) {
+    if (!item.productId || !mongoose.Types.ObjectId.isValid(item.productId)) {
+      return ApiResponse(res, 400, false, `Invalid productId: ${item.productId}`);
+    }
+    const actualStock = Number(item.actualStock);
+    if (isNaN(actualStock)) {
+      return ApiResponse(
+        res,
+        400,
+        false,
+        `Invalid actualStock for product ${item.productId}`
+      );
+    }
+  }
+
+  const productIds = items.map((i) => i.productId);
+  const uniqueIds = [...new Set(productIds)];
+  if (uniqueIds.length !== productIds.length) {
+    return ApiResponse(
+      res,
+      400,
+      false,
+      "Duplicate product IDs in reconciliation list"
+    );
+  }
+
+  const session = await mongoose.startSession();
+
+  try {
+    const result = await session.withTransaction(async () => {
+      const existingProducts = await Product.find({
+        _id: { $in: uniqueIds },
+        shopId,
+      })
+        .select("_id name stock costPrice retailPrice measuring")
+        .session(session)
+        .lean()
+        .exec();
+
+      const productMap = new Map(
+        existingProducts.map((p) => [p._id.toString(), p])
+      );
+
+      const missingIds = uniqueIds.filter((id) => !productMap.has(id));
+      if (missingIds.length > 0) {
+        throw new ApiError(404, `Products not found: ${missingIds.join(", ")}`);
+      }
+
+      const productBulkOps = [];
+      const stockDocs = [];
+      const updatedProducts = [];
+      const now = new Date();
+
+      for (const item of items) {
+        const prod = productMap.get(item.productId)!;
+        const previousStock = prod.stock;
+        const actualStock = Number(item.actualStock);
+        const diff = actualStock - previousStock;
+
+        productBulkOps.push({
+          updateOne: {
+            filter: { _id: prod._id, shopId },
+            update: { $set: { stock: actualStock } },
+          },
+        });
+
+        const reconciliationReason =
+          item.reason?.trim() ||
+          generalReason?.trim() ||
+          "Physical Stock Audit Reconciliation";
+
+        stockDocs.push({
+          shopId,
+          date: now,
+          createdBy: userId,
+          actionBy: userId,
+          actionAt: now,
+          approved: true,
+          rejected: false,
+          product: prod._id,
+          oldStock: previousStock,
+          quantity: diff,
+          stockAtUpdate: previousStock,
+          newStock: actualStock,
+          purpose: "STOCK_RECONCILIATION",
+          reason: reconciliationReason,
+        });
+
+        updatedProducts.push({
+          productId: prod._id.toString(),
+          name: prod.name,
+          previousStock,
+          newStock: actualStock,
+          quantityAdded: diff,
+          reason: reconciliationReason,
+        });
+      }
+
+      if (productBulkOps.length > 0) {
+        await Product.bulkWrite(productBulkOps, { session });
+      }
+
+      let insertedStockDocs: any[] = [];
+      if (stockDocs.length > 0) {
+        insertedStockDocs = await Stock.insertMany(stockDocs, { session });
+      }
+
+      return {
+        updatedCount: updatedProducts.length,
+        updatedProducts,
+        stockDocs: insertedStockDocs,
+      };
+    });
+
+    const io = req.app.get("io");
+    if (io) {
+      const stockPayload = {
+        action: "reconcile",
+        data: {
+          updatedProducts: result.updatedProducts,
+          stockDocs: result.stockDocs,
+        },
+      };
+      io.to(`shop:${shopId}`).emit("INVENTORY_UPDATED", stockPayload);
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.STOCK_UPDATED, stockPayload);
+    }
+
+    journeyQueue.add("stock-reconciled", {
+      shopId: shopId.toString(),
+      journeyLog: {
+        eventType: "STOCK_RECONCILED",
+        message: `Admin reconciled stock for ${result.updatedCount} products`,
+        createdBy: userId,
+        entityType: "Stock",
+        entityId: null,
+        metadata: {
+          count: result.updatedCount,
+          changes: result.updatedProducts.map((p) => ({
+            productId: p.productId,
+            name: p.name,
+            from: p.previousStock,
+            to: p.newStock,
+            diff: p.quantityAdded,
+            reason: p.reason,
+          })),
+        },
+      },
+    });
+
+    return ApiResponse(
+      res,
+      200,
+      true,
+      `Stock successfully reconciled for ${result.updatedCount} products`,
+      {
+        reconciled: result.updatedProducts,
+        count: result.updatedCount,
+      }
+    );
+  } catch (error: any) {
+    console.error("Stock reconciliation error:", error);
+    if (session.inTransaction()) await session.abortTransaction();
+    return getServerErrorLog(res, error);
+  } finally {
+    session.endSession();
+  }
+};
+
+export const getReconciliationHistory = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const shopId = req.shopId!;
+    const { page = 1, limit = 15, search, startDate, endDate } = req.query;
+
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(100, Math.max(1, Number(limit) || 15));
+    const skip = (pageNum - 1) * limitNum;
+
+    const query: any = {
+      shopId,
+      purpose: "STOCK_RECONCILIATION",
+    };
+
+    if (startDate && endDate) {
+      const start = moment.tz(startDate as string, IST).startOf("day").toDate();
+      const end = moment.tz(endDate as string, IST).endOf("day").toDate();
+      query.createdAt = { $gte: start, $lte: end };
+    }
+
+    if (search) {
+      const searchStr = String(search).trim();
+      const productOrClauses: any[] = [
+        { name: { $regex: searchStr, $options: "i" } },
+      ];
+      if (!isNaN(Number(searchStr))) {
+        productOrClauses.push({ barcode: Number(searchStr) });
+      }
+
+      const [matchingProducts, matchingUsers] = await Promise.all([
+        Product.find({ shopId, $or: productOrClauses }).select("_id").lean(),
+        mongoose
+          .model("User")
+          .find({
+            $or: [
+              { name: { $regex: searchStr, $options: "i" } },
+              { username: { $regex: searchStr, $options: "i" } },
+            ],
+          })
+          .select("_id")
+          .lean(),
+      ]);
+
+      query.$or = [
+        { product: { $in: matchingProducts.map((p) => p._id) } },
+        { actionBy: { $in: matchingUsers.map((u: any) => u._id) } },
+        { createdBy: { $in: matchingUsers.map((u: any) => u._id) } },
+        { reason: { $regex: searchStr, $options: "i" } },
+      ];
+    }
+
+    const [records, total] = await Promise.all([
+      Stock.find(query)
+        .populate(
+          "product",
+          "name barcode measuring costPrice retailPrice stock packet box"
+        )
+        .populate("actionBy", "name username")
+        .populate("createdBy", "name username")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Stock.countDocuments(query),
+    ]);
+
+    return ApiResponse(
+      res,
+      200,
+      true,
+      "Reconciliation history fetched successfully",
+      {
+        records,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+      }
+    );
+  } catch (error: any) {
+    console.error("Error fetching reconciliation history:", error);
+    return ApiResponse(res, 500, false, error.message || "Server Error");
   }
 };
 export const getInventoryUpdateRequest = async (

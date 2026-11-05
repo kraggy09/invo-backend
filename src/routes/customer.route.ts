@@ -9,6 +9,7 @@ import {
   getCustomerTransactions,
   getCustomerReturns,
   getCustomerJourneys,
+  updateCustomer,
 } from "../controllers/customer.controller";
 import { isAllowed } from "../services/token.service";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
@@ -16,7 +17,11 @@ import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 const customerRouter = express.Router();
 
 customerRouter.route("/").post(createNewCustomer).get(getAllCustomers);
-customerRouter.route("/:id").get(getSingleCustomer);
+customerRouter
+  .route("/:id")
+  .get(getSingleCustomer)
+  .put(isAllowed(["SUPER_ADMIN", "ADMIN"]), updateCustomer as any)
+  .patch(isAllowed(["SUPER_ADMIN", "ADMIN"]), updateCustomer as any);
 customerRouter.route("/:id/analytics").get(isAllowed(["SUPER_ADMIN", "ADMIN", "CREATOR"]), getCustomerAnalytics);
 customerRouter.route("/:id/history").get(isAllowed(["SUPER_ADMIN", "ADMIN", "CREATOR"]), getCustomerHistory);
 customerRouter.route("/:id/bills").get(getCustomerBills);

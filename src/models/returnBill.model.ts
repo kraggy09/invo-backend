@@ -72,6 +72,30 @@ const returnBillSchema = new Schema<IReturnBill>(
       required: true,
       enum: ["ADJUSTMENT", "CASH"],
     },
+    status: {
+      type: String,
+      enum: ["PENDING", "APPROVED", "REJECTED"],
+      default: "PENDING",
+      index: true,
+    },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    approvedAt: {
+      type: Date,
+    },
+    rejectedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    rejectedAt: {
+      type: Date,
+    },
+    rejectionReason: {
+      type: String,
+      trim: true,
+    },
     productsTotal: {
       type: Number,
     },
@@ -90,12 +114,10 @@ const returnBillSchema = new Schema<IReturnBill>(
   { timestamps: true },
 );
 
-// TTL index
-// returnBillSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 60 * 60 });
-
 // Compound unique indexes for multi-tenancy
 returnBillSchema.index({ shopId: 1, id: 1 }, { unique: true });
 returnBillSchema.index({ shopId: 1, originalBill: 1 });
+returnBillSchema.index({ shopId: 1, status: 1 });
 returnBillSchema.index(
   { shopId: 1, idempotencyKey: 1 },
   {

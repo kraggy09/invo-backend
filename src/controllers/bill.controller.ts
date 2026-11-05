@@ -357,7 +357,7 @@ export const getBillDetails = async (
     const id = req.params.id as string;
 
     const isObjectId = /^[0-9a-fA-F]{24}$/.test(id);
-    let bill;
+    let bill: any;
 
     if (isObjectId) {
       bill = await Bill.findOne({ _id: id, shopId })
@@ -379,8 +379,228 @@ export const getBillDetails = async (
       return ApiResponse(res, 404, false, "Failed to get the data of the bill");
     }
 
-    return ApiResponse(res, 200, true, "Found the bills", { bill });
+    const existingReturns = await ReturnBill.find({
+      shopId,
+      originalBill: bill._id,
+    })
+      .populate("createdBy", "name username")
+      .populate("rejectedBy", "name username")
+      .populate("items.product", "name")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const returnedQuantities: Record<string, number> = {};
+    existingReturns
+      .filter((rb: any) => rb.status !== "REJECTED")
+      .forEach((rb: any) => {
+        rb.items?.forEach((item: any) => {
+          const pId = item.product?._id ? item.product._id.toString() : item.product?.toString();
+          if (pId) {
+            returnedQuantities[pId] = (returnedQuantities[pId] || 0) + item.quantityReturned;
+          }
+        });
+      });
+
+    const billObj = bill.toObject ? bill.toObject() : bill;
+    billObj.items = (billObj.items || []).map((item: any) => {
+      const pId = item.product?._id
+        ? item.product._id.toString()
+        : item.product?.toString();
+      const returnedQty = (pId && returnedQuantities[pId]) || 0;
+      const remainingQty = Math.max(0, (item.quantity || 0) - returnedQty);
+      return {
+        ...item,
+        returnedQuantity: returnedQty,
+        remainingQuantity: remainingQty,
+        isFullyReturned: remainingQty === 0,
+      };
+    });
+
+    return ApiResponse(res, 200, true, "Found the bills", {
+      bill: billObj,
+      returnedQuantities,
+      existingReturns,
+    });
   } catch (error: any) {
+    return ApiResponse(res, 500, false, error.message || "Server Error");
+  }
+};
+
+export const searchBillsForReturn = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  try {
+    const shopId = req.shopId!;
+    const {
+      invoiceId,
+      customerId,
+      customerQuery,
+      productId,
+      productQuery,
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    const andConditions: any[] = [{ shopId }];
+
+    // 1. Invoice ID filter
+    if (invoiceId && String(invoiceId).trim()) {
+      const invStr = String(invoiceId).trim();
+      const isObjectId = /^[0-9a-fA-F]{24}$/.test(invStr);
+      const numId = Number(invStr);
+      if (isObjectId) {
+        andConditions.push({ _id: invStr });
+      } else if (!isNaN(numId)) {
+        andConditions.push({ id: numId });
+      } else {
+        return ApiResponse(res, 200, true, "Bills retrieved", {
+          bills: [],
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+        });
+      }
+    }
+
+    // 2. Customer filter (either direct ID or text query)
+    if (customerId && String(customerId).trim()) {
+      andConditions.push({
+        customer: new mongoose.Types.ObjectId(String(customerId).trim()),
+      });
+    } else if (customerQuery && String(customerQuery).trim()) {
+      const cq = String(customerQuery).trim();
+      const matchedCustomers = await Customer.find({
+        shopId,
+        $or: [
+          { name: { $regex: cq, $options: "i" } },
+          { phone: { $regex: cq, $options: "i" } },
+        ],
+      })
+        .select("_id")
+        .lean();
+      const customerIds = matchedCustomers.map((c) => c._id);
+      andConditions.push({ customer: { $in: customerIds } });
+    }
+
+    // 3. Product filter (either direct ID or text query e.g. "gold small")
+    if (productId && String(productId).trim()) {
+      const pId = new mongoose.Types.ObjectId(String(productId).trim());
+      andConditions.push({ "items.product": pId });
+    } else if (productQuery && String(productQuery).trim()) {
+      const pq = String(productQuery).trim();
+      const numBarcode = Number(pq);
+
+      const productFilter: any = {
+        shopId,
+        $or: [
+          { name: { $regex: pq, $options: "i" } },
+          { category: { $regex: pq, $options: "i" } },
+        ],
+      };
+      if (!isNaN(numBarcode)) {
+        productFilter.$or.push({ barcode: numBarcode });
+      }
+
+      const matchedProducts = await Product.find(productFilter)
+        .select("_id")
+        .lean();
+      const matchedProductIds = matchedProducts.map((p) => p._id);
+
+      const productOrList: any[] = [
+        { "items.productSnapshot.name": { $regex: pq, $options: "i" } },
+      ];
+      if (matchedProductIds.length > 0) {
+        productOrList.push({ "items.product": { $in: matchedProductIds } });
+      }
+      andConditions.push({ $or: productOrList });
+    }
+
+    const matchQuery =
+      andConditions.length > 1 ? { $and: andConditions } : andConditions[0];
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const limitNum = Number(limit);
+
+    const [bills, total] = await Promise.all([
+      Bill.find(matchQuery)
+        .populate("customer", "name phone outstanding")
+        .populate("createdBy", "name username")
+        .populate("items.product")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Bill.countDocuments(matchQuery),
+    ]);
+
+    // Attach return information for each bill
+    const billIds = bills.map((b: any) => b._id);
+    const existingReturns = await ReturnBill.find({
+      shopId,
+      originalBill: { $in: billIds },
+      status: { $ne: "REJECTED" },
+    })
+      .select("originalBill items status id createdAt")
+      .lean();
+
+    const returnMap: Record<string, Record<string, number>> = {};
+    existingReturns.forEach((rb: any) => {
+      const bId = rb.originalBill.toString();
+      if (!returnMap[bId]) returnMap[bId] = {};
+      rb.items?.forEach((item: any) => {
+        const pId = item.product?.toString();
+        if (pId) {
+          returnMap[bId][pId] =
+            (returnMap[bId][pId] || 0) + item.quantityReturned;
+        }
+      });
+    });
+
+    const enhancedBills = bills.map((bill: any) => {
+      const bId = bill._id.toString();
+      const billReturns = returnMap[bId] || {};
+
+      let totalItemsPurchased = 0;
+      let totalItemsReturned = 0;
+
+      const items = (bill.items || []).map((item: any) => {
+        const pId = item.product?._id
+          ? item.product._id.toString()
+          : item.product?.toString();
+        const returnedQty = (pId && billReturns[pId]) || 0;
+        const remainingQty = Math.max(0, (item.quantity || 0) - returnedQty);
+
+        totalItemsPurchased += item.quantity || 0;
+        totalItemsReturned += returnedQty;
+
+        return {
+          ...item,
+          returnedQuantity: returnedQty,
+          remainingQuantity: remainingQty,
+          isFullyReturned: remainingQty === 0,
+        };
+      });
+
+      return {
+        ...bill,
+        items,
+        returnedQuantities: billReturns,
+        totalItemsPurchased,
+        totalItemsReturned,
+        isFullyReturned:
+          totalItemsPurchased > 0 && totalItemsReturned >= totalItemsPurchased,
+      };
+    });
+
+    return ApiResponse(res, 200, true, "Bills retrieved successfully", {
+      bills: enhancedBills,
+      total,
+      page: Number(page),
+      limit: limitNum,
+    });
+  } catch (error: any) {
+    console.error("Error searching bills for return:", error);
     return ApiResponse(res, 500, false, error.message || "Server Error");
   }
 };
@@ -791,6 +1011,7 @@ export const checkEligibilityForAlter = async (
   const newerReturnQuery = ReturnBill.findOne({
     shopId,
     customer: customerId,
+    status: { $ne: "REJECTED" },
     createdAt: { $gt: bill.createdAt },
   });
   if (session) newerReturnQuery.session(session);

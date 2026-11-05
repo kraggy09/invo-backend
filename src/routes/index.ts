@@ -11,6 +11,8 @@ import journeyRouter from "./journey.route";
 import returnBillRouter from "./returnBill.route";
 import notificationRouter from "./notification.route";
 import shopRouter from "./shop.route";
+import supplierRouter from "./supplier.route";
+import supplierPurchaseRouter from "./supplierPurchase.route";
 import { verifyToken } from "../services/token.service";
 import { Request, Response } from "express";
 
@@ -20,7 +22,7 @@ const rootRouter = express.Router();
 
 // Basic route
 rootRouter.get("/", (req: Request, res: Response) => {
-    res.json({ message: "Welcome to InvoSync API" });
+  res.json({ message: "Welcome to InvoSync API" });
 });
 
 rootRouter.use("/users", userRouter);
@@ -40,5 +42,7 @@ rootRouter.use("/admin", adminRouter);
 rootRouter.use("/journey-logs", journeyRouter);
 rootRouter.use("/notifications", notificationRouter);
 rootRouter.use("/shops", shopRouter);
+rootRouter.use("/suppliers", supplierRouter);
+rootRouter.use("/supplier-purchases", supplierPurchaseRouter);
 
 export default rootRouter;

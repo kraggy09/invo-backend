@@ -8,6 +8,8 @@ export interface IReturnItem extends Document {
     originalType: "WHOLESALE" | "RETAIL" | "SUPERWHOLESALE";
 }
 
+export type ReturnBillStatus = "PENDING" | "APPROVED" | "REJECTED";
+
 export interface IReturnBill extends Document {
     shopId?: mongoose.Types.ObjectId;
     id: number;
@@ -18,6 +20,12 @@ export interface IReturnBill extends Document {
     items: IReturnItem[];
     totalAmount: number;
     paymentMode: "ADJUSTMENT" | "CASH";
+    status: ReturnBillStatus;
+    approvedBy?: mongoose.Types.ObjectId | string;
+    approvedAt?: Date;
+    rejectedBy?: mongoose.Types.ObjectId | string;
+    rejectedAt?: Date;
+    rejectionReason?: string;
     productsTotal?: number;
     previousOutstanding?: number;
     newOutstanding?: number;

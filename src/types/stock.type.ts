@@ -12,7 +12,12 @@ export interface IStock extends Document {
   newStock?: number;
   approved: boolean;
   rejected: boolean;
-  purpose: "STOCK_UPDATE" | "PRODUCT_RETURN";
+  purpose:
+    | "STOCK_UPDATE"
+    | "PRODUCT_RETURN"
+    | "SUPPLIER_PURCHASE"
+    | "STOCK_RECONCILIATION";
+  reason?: string;
   returnBill?: Types.ObjectId;
   actionAt: Date;
   createdAt: Date;

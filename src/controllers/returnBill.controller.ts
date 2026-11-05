@@ -29,13 +29,16 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
     if (idempotencyKey) {
         const existingReturnBill = await ReturnBill.findOne({ shopId, idempotencyKey })
             .populate("customer")
+            .populate("originalBill")
             .populate("createdBy", "name username")
+            .populate("approvedBy", "name username")
+            .populate("rejectedBy", "name username")
             .populate("items.product");
 
         if (existingReturnBill) {
             const transaction = await Transaction.findOne({
                 shopId,
-                idempotencyKey
+                idempotencyKey: `${idempotencyKey}-tx`
             }).sort({ createdAt: -1 });
 
             const stockLogs = await Stock.find({ shopId, returnBill: existingReturnBill._id })
@@ -67,8 +70,12 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
             const customer = await Customer.findOne({ _id: customerId, shopId }).session(session);
             if (!customer) throw new ApiError(404, "Customer not found");
 
-            // Verify item quantities against original bill — SCOPED
-            const existingReturns = await ReturnBill.find({ shopId, originalBill: originalBillId }).session(session);
+            // Verify item quantities against original bill — SCOPED (only consider active non-rejected returns)
+            const existingReturns = await ReturnBill.find({
+                shopId,
+                originalBill: originalBillId,
+                status: { $ne: "REJECTED" }
+            }).session(session);
 
             const returnedItemQuantities = new Map<string, number>();
             existingReturns.forEach((rb) => {
@@ -85,8 +92,6 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
             });
 
             let calculatedTotal = 0;
-            const productBulkOps: any[] = [];
-            const stockLogOps: any[] = [];
             const productIds = items.map((i: any) => new mongoose.Types.ObjectId(i.product));
 
             // Products must also belong to this shop
@@ -109,35 +114,6 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
                 }
 
                 calculatedTotal += item.returnTotal;
-
-                // Stock Update — also includes shopId filter
-                productBulkOps.push({
-                    updateOne: {
-                        filter: { _id: new mongoose.Types.ObjectId(item.product), shopId },
-                        update: { $inc: { stock: item.quantityReturned } },
-                    },
-                });
-
-                const p = productMap.get(pIdStr);
-                const oldStock = p.stock || 0;
-                stockLogOps.push({
-                    insertOne: {
-                        document: {
-                            shopId,
-                            approvedBy: createdBy,
-                            product: new mongoose.Types.ObjectId(item.product),
-                            oldStock: oldStock,
-                            stockAtUpdate: oldStock,
-                            quantity: item.quantityReturned,
-                            newStock: oldStock + item.quantityReturned,
-                            approved: true,
-                            rejected: false,
-                            purpose: "PRODUCT_RETURN",
-                            createdBy: createdBy,
-                            date: moment.tz(getCurrentDateAndTime(), IST),
-                        }
-                    }
-                });
             }
 
             if (Math.abs(calculatedTotal - totalAmount) > 1) {
@@ -155,7 +131,7 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
                 throw new ApiError(500, "Error generating Return Bill ID");
             }
 
-            // 3. Create ReturnBill with shopId
+            // 3. Create ReturnBill in PENDING status (no stock or customer balance change yet)
             const [newReturnBill] = await ReturnBill.create(
                 [
                     {
@@ -168,143 +144,41 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
                         totalAmount: calculatedTotal,
                         productsTotal: calculatedTotal,
                         previousOutstanding: customer.outstanding,
+                        newOutstanding: customer.outstanding, // Remains unadjusted until admin approves
                         paymentMode,
+                        status: "PENDING",
                         idempotencyKey,
                     },
                 ],
                 { session }
             );
 
-            if (productBulkOps.length > 0) {
-                stockLogOps.forEach((op: any) => {
-                    if (op.insertOne && op.insertOne.document) {
-                        op.insertOne.document.returnBill = newReturnBill._id;
-                    }
-                });
-
-                const bulkResult = await Product.bulkWrite(productBulkOps, { session });
-                if (bulkResult.modifiedCount !== items.length) {
-                    throw new ApiError(500, "Product stock update mismatch");
-                }
-
-                const stockLogResult = await Stock.bulkWrite(stockLogOps, { session });
-                if (stockLogResult.insertedCount !== items.length) {
-                    throw new ApiError(500, "Failed to insert stock records for returns");
-                }
-            }
-
-            // Fetch created stock logs to send back
-            const stockLogs = await Stock.find({ shopId, returnBill: newReturnBill._id })
-                .populate("product", "name stock")
-                .populate("createdBy", "name username")
-                .session(session);
-
-            // 5. Handle Payment Logic
-            let transaction = null;
-            let newOutstanding = customer.outstanding;
-
-            if (paymentMode === "ADJUSTMENT") {
-                newOutstanding = customer.outstanding - calculatedTotal;
-                await Customer.findOneAndUpdate({ _id: customerId, shopId }, { outstanding: newOutstanding }, { session });
-                newReturnBill.newOutstanding = newOutstanding;
-                await newReturnBill.save({ session });
-
-                const transCounter = await Counter.findOneAndUpdate(
-                    { shopId, name: "transactionId" },
-                    { $inc: { value: 1 } },
-                    { new: true, session }
-                );
-
-                if (!transCounter) throw new ApiError(500, "Error generating transaction ID");
-
-                const [createdTransaction] = await Transaction.create(
-                    [
-                        {
-                            shopId,
-                            id: transCounter.value,
-                            name: customer.name,
-                            purpose: "PRODUCT_RETURN",
-                            amount: calculatedTotal,
-                            previousOutstanding: customer.outstanding,
-                            newOutstanding: newOutstanding,
-                            paymentMode: "ADJUSTMENT",
-                            approved: true,
-                            paymentIn: true,
-                            approvedBy: createdBy,
-                            customer: customer._id,
-                            idempotencyKey,
-                        },
-                    ],
-                    { session }
-                );
-                transaction = createdTransaction;
-            } else if (paymentMode === "CASH") {
-                newReturnBill.newOutstanding = customer.outstanding;
-                await newReturnBill.save({ session });
-                const transCounter = await Counter.findOneAndUpdate(
-                    { shopId, name: "transactionId" },
-                    { $inc: { value: 1 } },
-                    { new: true, session }
-                );
-
-                if (!transCounter) throw new ApiError(500, "Error generating transaction ID");
-
-                const [createdTransaction] = await Transaction.create(
-                    [
-                        {
-                            shopId,
-                            id: transCounter.value,
-                            name: customer.name,
-                            purpose: "PRODUCT_RETURN",
-                            amount: calculatedTotal,
-                            previousOutstanding: customer.outstanding,
-                            newOutstanding: customer.outstanding,
-                            paymentMode: "CASH",
-                            approved: true,
-                            paymentIn: false,
-                            approvedBy: createdBy,
-                            customer: customer._id,
-                            idempotencyKey,
-                        },
-                    ],
-                    { session }
-                );
-                transaction = createdTransaction;
-            }
-
             return {
                 returnBill: newReturnBill,
-                transaction,
-                stockLogs,
-                updatedOutstanding: newOutstanding
             };
         });
 
         const populatedRB = await ReturnBill.findOne({ _id: result.returnBill._id, shopId })
             .populate("customer")
+            .populate("originalBill")
             .populate("createdBy", "name username")
             .populate("items.product");
 
-        // Socket Emit — SCOPED to shop room
+        // Socket Emit — notify shop room of pending return bill
         const io = req.app.get("io");
         if (io) {
             io.to(`shop:${shopId}`).emit(EVENTS_MAP.RETURN_BILL_CREATED, {
                 returnBill: populatedRB,
-                transaction: result.transaction,
-                stockLogs: result.stockLogs,
-                updatedOutstanding: result.updatedOutstanding,
                 socketId: req.headers.socketid
             });
-
-            io.to(`shop:${shopId}`).emit("INVENTORY_UPDATE_REQUEST", result.stockLogs);
         }
 
-        // Journey Log — includes shopId in payload
+        // System Journey Log for creation / pending approval
         journeyQueue.add("return-bill-created", {
             shopId: shopId.toString(),
             journeyLog: {
                 eventType: "PRODUCT_RETURN",
-                message: `Return Bill #${populatedRB?.id} created for ${(populatedRB?.customer as any)?.name || "Customer"}. Total Returned: ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
+                message: `Return Bill #${populatedRB?.id} initiated for ${(populatedRB?.customer as any)?.name || "Customer"} (Pending Admin Approval). Total: ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
                 createdBy,
                 entityType: "ReturnBill",
                 entityId: populatedRB?._id,
@@ -312,27 +186,14 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
                     originalBillId,
                     itemsCount: items.length,
                     paymentMode,
-                    totalAmount
+                    totalAmount,
+                    status: "PENDING"
                 }
-            },
-            customerJourneyLog: {
-                customerId,
-                eventType: "PRODUCT_RETURN",
-                message: `Return Bill #${populatedRB?.id} created for ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
-                createdBy,
-                amount: totalAmount,
-                previousOutstanding: populatedRB?.previousOutstanding,
-                outstanding: populatedRB?.newOutstanding,
-                billId: populatedRB?._id,
-                metadata: { originalBillId, itemsCount: items.length, paymentMode }
             }
         });
 
-        return ApiResponse(res, 201, true, "Return bill created successfully", {
+        return ApiResponse(res, 201, true, "Return bill initiated successfully and is pending admin approval", {
             returnBill: populatedRB,
-            transaction: result.transaction,
-            stockLogs: result.stockLogs,
-            updatedOutstanding: result.updatedOutstanding
         });
 
     } catch (error: any) {
@@ -346,12 +207,348 @@ export const createReturnBill = async (req: AuthenticatedRequest, res: Response)
     }
 };
 
+export const approveReturnBill = async (req: AuthenticatedRequest, res: Response) => {
+    const shopId = req.shopId!;
+    const { id } = req.params;
+    const userId = getUserId(req);
+
+    const session: ClientSession = await mongoose.startSession();
+
+    try {
+        const result = await session.withTransaction(async () => {
+            const returnBill = await ReturnBill.findOne({ _id: id, shopId }).session(session);
+            if (!returnBill) throw new ApiError(404, "Return bill not found");
+
+            if (returnBill.status !== "PENDING") {
+                throw new ApiError(400, `Cannot approve return bill with status ${returnBill.status}`);
+            }
+
+            const customer = await Customer.findOne({ _id: returnBill.customer, shopId }).session(session);
+            if (!customer) throw new ApiError(404, "Customer not found");
+
+            // Validate outstanding balance - exact match required just like transaction approvals
+            if (
+                returnBill.previousOutstanding === undefined ||
+                returnBill.previousOutstanding === null ||
+                Math.abs(customer.outstanding - returnBill.previousOutstanding) > 0.01
+            ) {
+                throw new ApiError(
+                    400,
+                    "Outstanding balance does not match, please check",
+                    { customer, returnBill }
+                );
+            }
+
+            const productIds = returnBill.items.map((i: any) => new mongoose.Types.ObjectId(i.product));
+            const availableProducts = await Product.find({ _id: { $in: productIds }, shopId }, { stock: 1 }).session(session);
+            const productMap = new Map<string, any>();
+            availableProducts.forEach((p: any) => productMap.set(p._id.toString(), p));
+
+            const productBulkOps: any[] = [];
+            const stockLogOps: any[] = [];
+
+            for (const item of returnBill.items) {
+                const pIdStr = item.product.toString();
+                if (!productMap.has(pIdStr)) {
+                    throw new ApiError(404, `Product ${pIdStr} not found in database`);
+                }
+
+                productBulkOps.push({
+                    updateOne: {
+                        filter: { _id: new mongoose.Types.ObjectId(item.product), shopId },
+                        update: { $inc: { stock: item.quantityReturned } },
+                    },
+                });
+
+                const p = productMap.get(pIdStr);
+                const oldStock = p.stock || 0;
+                stockLogOps.push({
+                    insertOne: {
+                        document: {
+                            shopId,
+                            approvedBy: userId,
+                            product: new mongoose.Types.ObjectId(item.product),
+                            oldStock: oldStock,
+                            stockAtUpdate: oldStock,
+                            quantity: item.quantityReturned,
+                            newStock: oldStock + item.quantityReturned,
+                            approved: true,
+                            rejected: false,
+                            purpose: "PRODUCT_RETURN",
+                            returnBill: returnBill._id,
+                            createdBy: userId,
+                            date: moment.tz(getCurrentDateAndTime(), IST),
+                        }
+                    }
+                });
+            }
+
+            if (productBulkOps.length > 0) {
+                const bulkResult = await Product.bulkWrite(productBulkOps, { session });
+                if (bulkResult.modifiedCount !== returnBill.items.length) {
+                    throw new ApiError(500, "Product stock update mismatch");
+                }
+
+                const stockLogResult = await Stock.bulkWrite(stockLogOps, { session });
+                if (stockLogResult.insertedCount !== returnBill.items.length) {
+                    throw new ApiError(500, "Failed to insert stock records for returns");
+                }
+            }
+
+            const stockLogs = await Stock.find({ shopId, returnBill: returnBill._id })
+                .populate("product", "name stock")
+                .populate("createdBy", "name username")
+                .session(session);
+
+            let transaction = null;
+            const previousOutstanding = customer.outstanding;
+            let newOutstanding = customer.outstanding;
+
+            const transCounter = await Counter.findOneAndUpdate(
+                { shopId, name: "transactionId" },
+                { $inc: { value: 1 } },
+                { new: true, upsert: true, session }
+            );
+
+            if (!transCounter) throw new ApiError(500, "Error generating transaction ID");
+
+            if (returnBill.paymentMode === "ADJUSTMENT") {
+                newOutstanding = customer.outstanding - returnBill.totalAmount;
+                await Customer.findOneAndUpdate({ _id: customer._id, shopId }, { outstanding: newOutstanding }, { session });
+
+                const [createdTransaction] = await Transaction.create(
+                    [
+                        {
+                            shopId,
+                            id: transCounter.value,
+                            name: customer.name,
+                            purpose: "PRODUCT_RETURN",
+                            amount: returnBill.totalAmount,
+                            previousOutstanding: previousOutstanding,
+                            newOutstanding: newOutstanding,
+                            paymentMode: "ADJUSTMENT",
+                            approved: true,
+                            paymentIn: true,
+                            approvedBy: userId,
+                            customer: customer._id,
+                            idempotencyKey: returnBill.idempotencyKey ? `${returnBill.idempotencyKey}-tx` : undefined,
+                        },
+                    ],
+                    { session }
+                );
+                transaction = createdTransaction;
+            } else if (returnBill.paymentMode === "CASH") {
+                const [createdTransaction] = await Transaction.create(
+                    [
+                        {
+                            shopId,
+                            id: transCounter.value,
+                            name: customer.name,
+                            purpose: "PRODUCT_RETURN",
+                            amount: returnBill.totalAmount,
+                            previousOutstanding: previousOutstanding,
+                            newOutstanding: previousOutstanding,
+                            paymentMode: "CASH",
+                            approved: true,
+                            paymentIn: false,
+                            approvedBy: userId,
+                            customer: customer._id,
+                            idempotencyKey: returnBill.idempotencyKey ? `${returnBill.idempotencyKey}-tx` : undefined,
+                        },
+                    ],
+                    { session }
+                );
+                transaction = createdTransaction;
+            }
+
+            returnBill.status = "APPROVED";
+            returnBill.approvedBy = userId as any;
+            returnBill.approvedAt = moment.tz(getCurrentDateAndTime(), IST).toDate();
+            returnBill.previousOutstanding = previousOutstanding;
+            returnBill.newOutstanding = newOutstanding;
+            await returnBill.save({ session });
+
+            return {
+                returnBill,
+                transaction,
+                stockLogs,
+                updatedOutstanding: newOutstanding
+            };
+        });
+
+        const populatedRB = await ReturnBill.findOne({ _id: result.returnBill._id, shopId })
+            .populate("customer")
+            .populate("originalBill")
+            .populate("createdBy", "name username")
+            .populate("approvedBy", "name username")
+            .populate("items.product");
+
+        let populatedTransaction = null;
+        if (result.transaction?._id) {
+            populatedTransaction = await Transaction.findOne({ _id: result.transaction._id, shopId })
+                .populate("customer")
+                .populate("approvedBy", "name username");
+        }
+
+        const io = req.app.get("io");
+        if (io) {
+            const txToEmit = populatedTransaction || result.transaction;
+            const txIdToEmit = txToEmit?.id;
+
+            io.to(`shop:${shopId}`).emit(EVENTS_MAP.RETURN_BILL_APPROVED, {
+                returnBill: populatedRB,
+                transaction: txToEmit,
+                transactionId: txIdToEmit,
+                stockLogs: result.stockLogs,
+                updatedOutstanding: result.updatedOutstanding,
+                socketId: req.headers.socketid
+            });
+
+            if (populatedRB?.customer) {
+                const customerObj = typeof populatedRB.customer === "object"
+                    ? { ...(populatedRB.customer as any).toObject?.() || populatedRB.customer, outstanding: result.updatedOutstanding }
+                    : { _id: populatedRB.customer, outstanding: result.updatedOutstanding };
+
+                io.to(`shop:${shopId}`).emit(EVENTS_MAP.CUSTOMER_UPDATED, {
+                    ...customerObj,
+                    customer: customerObj,
+                    updatedCustomer: customerObj,
+                    socketId: req.headers.socketid
+                });
+            }
+
+            if (txToEmit) {
+                io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_CREATED, {
+                    transaction: txToEmit,
+                    transactionId: txIdToEmit,
+                    customer: populatedRB?.customer,
+                    socketId: req.headers.socketid
+                });
+            }
+
+            io.to(`shop:${shopId}`).emit("INVENTORY_UPDATE_REQUEST", result.stockLogs);
+        }
+
+        journeyQueue.add("return-bill-approved", {
+            shopId: shopId.toString(),
+            journeyLog: {
+                eventType: "PRODUCT_RETURN",
+                message: `Return Bill #${populatedRB?.id} approved by ${(req.user as any)?.name || "Admin"}. Total: ₹${populatedRB?.totalAmount}. Mode: ${populatedRB?.paymentMode}`,
+                createdBy: userId,
+                entityType: "ReturnBill",
+                entityId: populatedRB?._id,
+                metadata: {
+                    originalBillId: populatedRB?.originalBill,
+                    itemsCount: populatedRB?.items?.length,
+                    paymentMode: populatedRB?.paymentMode,
+                    totalAmount: populatedRB?.totalAmount,
+                }
+            },
+            customerJourneyLog: {
+                customerId: (populatedRB?.customer as any)?._id || populatedRB?.customer,
+                eventType: "PRODUCT_RETURN",
+                message: `Return Bill #${populatedRB?.id} of ₹${populatedRB?.totalAmount} approved. Mode: ${populatedRB?.paymentMode}`,
+                createdBy: userId,
+                amount: populatedRB?.totalAmount,
+                previousOutstanding: populatedRB?.previousOutstanding,
+                outstanding: populatedRB?.newOutstanding,
+                billId: populatedRB?._id,
+                metadata: {
+                    originalBillId: populatedRB?.originalBill,
+                    itemsCount: populatedRB?.items?.length,
+                    paymentMode: populatedRB?.paymentMode,
+                }
+            }
+        });
+
+        return ApiResponse(res, 200, true, "Return bill approved successfully", {
+            returnBill: populatedRB,
+            transaction: populatedTransaction || result.transaction,
+            stockLogs: result.stockLogs,
+            updatedOutstanding: result.updatedOutstanding
+        });
+
+    } catch (error: any) {
+        console.error("❌ Return Bill approval error:", error);
+        if (error instanceof ApiError) {
+            return ApiResponse(res, error.statusCode, false, error.message, error.data);
+        }
+        return ApiResponse(res, 500, false, error.message || "Server Error");
+    } finally {
+        session.endSession();
+    }
+};
+
+export const rejectReturnBill = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const shopId = req.shopId!;
+        const { id } = req.params;
+        const { reason = "Rejected by admin" } = req.body;
+        const userId = getUserId(req);
+
+        const returnBill = await ReturnBill.findOne({ _id: id, shopId });
+        if (!returnBill) {
+            return ApiResponse(res, 404, false, "Return bill not found");
+        }
+
+        if (returnBill.status !== "PENDING") {
+            return ApiResponse(res, 400, false, `Cannot reject return bill in ${returnBill.status} state`);
+        }
+
+        returnBill.status = "REJECTED";
+        returnBill.rejectedBy = userId as any;
+        returnBill.rejectedAt = moment.tz(getCurrentDateAndTime(), IST).toDate();
+        returnBill.rejectionReason = reason;
+        await returnBill.save();
+
+        const populatedRB = await ReturnBill.findOne({ _id: returnBill._id, shopId })
+            .populate("customer")
+            .populate("originalBill")
+            .populate("createdBy", "name username")
+            .populate("rejectedBy", "name username")
+            .populate("items.product");
+
+        const io = req.app.get("io");
+        if (io) {
+            io.to(`shop:${shopId}`).emit(EVENTS_MAP.RETURN_BILL_REJECTED, {
+                returnBill: populatedRB,
+                socketId: req.headers.socketid
+            });
+        }
+
+        journeyQueue.add("return-bill-rejected", {
+            shopId: shopId.toString(),
+            journeyLog: {
+                eventType: "PRODUCT_RETURN",
+                message: `Return Bill #${populatedRB?.id} rejected by ${(req.user as any)?.name || "Admin"}. Reason: ${reason}`,
+                createdBy: userId,
+                entityType: "ReturnBill",
+                entityId: populatedRB?._id,
+                metadata: { reason }
+            }
+        });
+
+        return ApiResponse(res, 200, true, "Return bill rejected successfully", {
+            returnBill: populatedRB
+        });
+
+    } catch (error: any) {
+        console.error("❌ Return Bill rejection error:", error);
+        return ApiResponse(res, 500, false, error.message || "Server Error");
+    }
+};
+
 export const getAllReturnBills = async (req: AuthenticatedRequest, res: Response) => {
     try {
         const shopId = req.shopId!;
-        const { startDate, endDate, page = 1, limit = 10 } = req.query;
+        const { startDate, endDate, status, page = 1, limit = 10 } = req.query;
 
         let query: any = { shopId };
+
+        if (status && status !== "ALL") {
+            query.status = status;
+        }
+
         if (startDate && endDate) {
             const start = moment.tz(startDate as string, IST).startOf("day").toDate();
             const end = moment.tz(endDate as string, IST).endOf("day").toDate();
@@ -362,9 +559,12 @@ export const getAllReturnBills = async (req: AuthenticatedRequest, res: Response
 
         const [returnBills, total] = await Promise.all([
             ReturnBill.find(query)
-                .populate("customer", "name phone")
+                .populate("customer", "name phone outstanding")
+                .populate("originalBill")
                 .populate("createdBy", "name username")
-                .populate("items.product", "name")
+                .populate("approvedBy", "name username")
+                .populate("rejectedBy", "name username")
+                .populate("items.product", "name stock")
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(Number(limit))
@@ -403,6 +603,7 @@ export const getReturnBillsSummary = async (req: AuthenticatedRequest, res: Resp
 
         const returnStats = await ReturnBill.aggregate([
             scopedMatch(shopId, {
+                $or: [{ status: "APPROVED" }, { status: { $exists: false } }],
                 createdAt: { $gte: start, $lte: end },
             }),
             {
@@ -435,6 +636,8 @@ export const getReturnBillById = async (req: AuthenticatedRequest, res: Response
         const returnBill = await ReturnBill.findOne({ _id: id, shopId })
             .populate("customer")
             .populate("createdBy", "name username")
+            .populate("approvedBy", "name username")
+            .populate("rejectedBy", "name username")
             .populate("originalBill")
             .populate("items.product");
 
