@@ -11,7 +11,8 @@
     "migrate:multitenant": "ts-node src/scripts/migrate-to-multitenant.ts",
     "indexes:create": "ts-node src/scripts/createIndexes.ts",
     "onboard:shop": "ts-node src/scripts/onboard-shop.ts",
-    "migrate:settings": "ts-node src/scripts/migrate-shop-settings.ts"
+    "migrate:settings": "ts-node src/scripts/migrate-shop-settings.ts",
+    "sales:category": "node src/scripts/calculate-category-sales.js"
   },
   "keywords": [],
   "author": "",

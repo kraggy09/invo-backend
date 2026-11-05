@@ -24,6 +24,17 @@ export interface IBill extends Document {
   payment: number;
   discount: number;
   idempotencyKey?: string;
+  alteredAt?: Date;
+  alteredBy?: mongoose.Types.ObjectId | string;
+  originalTotalBeforeAlter?: number;
+  alterHistory?: Array<{
+    alteredAt: Date;
+    alteredBy: mongoose.Types.ObjectId | string;
+    previousProductsTotal: number;
+    previousTotal: number;
+    newProductsTotal: number;
+    newTotal: number;
+  }>;
   createdAt: Date;
   updatedAt: Date;
 }

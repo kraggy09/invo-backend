@@ -93,6 +93,26 @@ const billSchema = new Schema<IBill>(
       sparse: true,
       // No longer globally unique — compound index below
     },
+    alteredAt: {
+      type: Date,
+    },
+    alteredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    originalTotalBeforeAlter: {
+      type: Number,
+    },
+    alterHistory: [
+      {
+        alteredAt: { type: Date, default: Date.now },
+        alteredBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        previousProductsTotal: Number,
+        previousTotal: Number,
+        newProductsTotal: Number,
+        newTotal: Number,
+      },
+    ],
   },
   { timestamps: true },
 );
