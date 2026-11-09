@@ -2,10 +2,12 @@ import { Request, Response } from "express";
 import Shop from "../models/shop.model";
 import ShopMember from "../models/shopMember.model";
 import User from "../models/user.model";
+import Product from "../models/product.model";
 import ApiResponse from "../utils/ApiResponse";
 import bcrypt from "bcrypt";
 import mongoose from "mongoose";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
+import { EVENTS_MAP } from "../constant/redisMap";
 
 /**
  * Create a new shop. The creating user becomes SUPER_ADMIN of the shop.
@@ -39,21 +41,39 @@ export const createShop = async (req: Request, res: Response) => {
     if (existingShop) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 409, false, "A shop with this slug already exists");
+      return ApiResponse(
+        res,
+        409,
+        false,
+        "A shop with this slug already exists",
+      );
     }
 
     // Find or create owner user
-    let owner = await User.findOne({ username: ownerUsername }).session(session);
+    let owner = await User.findOne({ username: ownerUsername }).session(
+      session,
+    );
     if (!owner) {
       if (!ownerPassword) {
         await session.abortTransaction();
         session.endSession();
-        return ApiResponse(res, 400, false, "Owner password is required when creating a new user");
+        return ApiResponse(
+          res,
+          400,
+          false,
+          "Owner password is required when creating a new user",
+        );
       }
       const hashedPassword = await bcrypt.hash(ownerPassword, 10);
       const newOwners = await User.create(
-        [{ name: ownerName || ownerUsername, username: ownerUsername, password: hashedPassword }],
-        { session }
+        [
+          {
+            name: ownerName || ownerUsername,
+            username: ownerUsername,
+            password: hashedPassword,
+          },
+        ],
+        { session },
       );
       owner = newOwners[0];
     }
@@ -77,15 +97,22 @@ export const createShop = async (req: Request, res: Response) => {
           },
         },
       ],
-      { session }
+      { session },
     );
 
     const shop = shops[0];
 
     // Add owner as SUPER_ADMIN member
     await ShopMember.create(
-      [{ shop: shop._id, user: owner._id, roles: ["SUPER_ADMIN"], isActive: true }],
-      { session }
+      [
+        {
+          shop: shop._id,
+          user: owner._id,
+          roles: ["SUPER_ADMIN"],
+          isActive: true,
+        },
+      ],
+      { session },
     );
 
     // Initialize counters for this shop
@@ -96,7 +123,7 @@ export const createShop = async (req: Request, res: Response) => {
         { shopId: shop._id, name: "transactionId", value: 1 },
         { shopId: shop._id, name: "returnBillId", value: 1 },
       ],
-      { session }
+      { session },
     );
 
     await session.commitTransaction();
@@ -128,10 +155,15 @@ export const getAllShops = async (_: Request, res: Response) => {
 /**
  * Get the current shop's profile (for authenticated users).
  */
-export const getShopProfile = async (req: AuthenticatedRequest, res: Response) => {
+export const getShopProfile = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
     const shopId = req.shopId!;
-    const shop = await Shop.findById(shopId).populate("owner", "name username").lean();
+    const shop = await Shop.findById(shopId)
+      .populate("owner", "name username")
+      .lean();
     if (!shop) {
       return ApiResponse(res, 404, false, "Shop not found");
     }
@@ -144,7 +176,10 @@ export const getShopProfile = async (req: AuthenticatedRequest, res: Response) =
 /**
  * Update the current shop's settings.
  */
-export const updateShopSettings = async (req: AuthenticatedRequest, res: Response) => {
+export const updateShopSettings = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
   try {
     const shopId = req.shopId!;
     const { name, phone, address, gstin, settings } = req.body;
@@ -155,22 +190,78 @@ export const updateShopSettings = async (req: AuthenticatedRequest, res: Respons
     if (address) updateData.address = address;
     if (gstin) updateData.gstin = gstin;
     if (settings) {
-      if (settings.discordWebhookUrl !== undefined) updateData["settings.discordWebhookUrl"] = settings.discordWebhookUrl;
-      if (settings.lowStockAlert !== undefined) updateData["settings.lowStockAlert"] = settings.lowStockAlert;
-      if (settings.invoicePrefix !== undefined) updateData["settings.invoicePrefix"] = settings.invoicePrefix;
+      if (settings.discordWebhookUrl !== undefined)
+        updateData["settings.discordWebhookUrl"] = settings.discordWebhookUrl;
+      if (settings.lowStockAlert !== undefined)
+        updateData["settings.lowStockAlert"] = Number(settings.lowStockAlert);
+      if (settings.invoicePrefix !== undefined)
+        updateData["settings.invoicePrefix"] = settings.invoicePrefix;
+      if (settings.pricingMode !== undefined)
+        updateData["settings.pricingMode"] = settings.pricingMode;
+      if (settings.printType !== undefined)
+        updateData["settings.printType"] = settings.printType;
+      if (settings.currentBarcode !== undefined)
+        updateData["settings.currentBarcode"] = Number(settings.currentBarcode);
     }
 
     const updatedShop = await Shop.findByIdAndUpdate(
       shopId,
       { $set: updateData },
-      { new: true }
+      { new: true },
     );
 
     if (!updatedShop) {
       return ApiResponse(res, 404, false, "Shop not found");
     }
 
-    return ApiResponse(res, 200, true, "Shop settings updated", { shop: updatedShop });
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`shop:${shopId}`).emit(EVENTS_MAP.SHOP_SETTINGS_UPDATED, {
+        settings: updatedShop.settings,
+        currentBarcode: updatedShop.settings?.currentBarcode,
+      });
+    }
+
+    return ApiResponse(res, 200, true, "Shop settings updated", {
+      shop: updatedShop,
+    });
+  } catch (error: any) {
+    return ApiResponse(res, 500, false, "Internal Server Error", error.message);
+  }
+};
+
+/**
+ * Get next available auto barcode for the current shop.
+ * Guarantees uniqueness against existing product barcodes in this shop.
+ */
+export const getNextBarcode = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  try {
+    const shopId = req.shopId!;
+    const shop = await Shop.findById(shopId).select("settings");
+    if (!shop) {
+      return ApiResponse(res, 404, false, "Shop not found");
+    }
+
+    let candidate = shop.settings?.currentBarcode ?? 1000;
+
+    // Ensure candidate doesn't conflict with any existing product barcode in this shop
+    while (await Product.findOne({ shopId, barcode: candidate })) {
+      candidate++;
+    }
+
+    // If candidate advanced past what's in shop settings, persist it
+    if (shop.settings?.currentBarcode !== candidate) {
+      await Shop.findByIdAndUpdate(shopId, {
+        $set: { "settings.currentBarcode": candidate },
+      });
+    }
+
+    return ApiResponse(res, 200, true, "Next barcode retrieved", {
+      currentBarcode: candidate,
+    });
   } catch (error: any) {
     return ApiResponse(res, 500, false, "Internal Server Error", error.message);
   }

@@ -767,6 +767,134 @@ export const rejectSupplierPurchase = async (
   }
 };
 
+export const discardSupplierPurchaseItem = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  const shopId = req.shopId!;
+  const userId = req.user?.id || req.user?._id;
+  const { id, productId } = req.params;
+
+  if (!productId) {
+    return ApiResponse(res, 400, false, "Product ID is required");
+  }
+
+  try {
+    const purchase = await SupplierPurchase.findOne({ _id: id, shopId })
+      .populate("supplier", "name phone outstanding")
+      .populate("raisedBy", "name username")
+      .populate("acceptedBy", "name username")
+      .populate(
+        "items.product",
+        "name barcode measuring mrp costPrice retailPrice wholesalePrice superWholesalePrice stock packet box",
+      );
+
+    if (!purchase) {
+      return ApiResponse(res, 404, false, "Purchase not found");
+    }
+
+    if (purchase.status === "APPROVED") {
+      return ApiResponse(
+        res,
+        400,
+        false,
+        "Cannot discard items from an approved purchase as stock and finances are already committed",
+      );
+    }
+
+    if (purchase.status === "REJECTED") {
+      return ApiResponse(
+        res,
+        400,
+        false,
+        "Cannot discard items from a rejected purchase",
+      );
+    }
+
+    const itemIndex = purchase.items.findIndex((item: any) => {
+      const pid = item.product?._id
+        ? item.product._id.toString()
+        : item.product.toString();
+      return pid === productId;
+    });
+
+    if (itemIndex === -1) {
+      return ApiResponse(
+        res,
+        404,
+        false,
+        "Item not found in this inward request",
+      );
+    }
+
+    const io = req.app.get("io");
+
+    // If this is the only remaining item in the purchase, discarding it rejects the whole purchase
+    if (purchase.items.length <= 1) {
+      purchase.status = "REJECTED";
+      purchase.rejectedBy = userId;
+      purchase.rejectedAt = new Date();
+      await purchase.save();
+
+      const populatedPurchase = purchase.toObject();
+
+      if (io) {
+        io.to(`shop:${shopId}`).emit(
+          EVENTS_MAP.SUPPLIER_PURCHASE_REJECTED,
+          populatedPurchase,
+        );
+      }
+
+      return ApiResponse(
+        res,
+        200,
+        true,
+        "Last item discarded. Inward request was rejected.",
+        {
+          purchase: populatedPurchase,
+          purchaseRejected: true,
+        },
+      );
+    }
+
+    // Remove the item from the items array
+    purchase.items.splice(itemIndex, 1);
+
+    // Recalculate totalAmount from remaining items
+    let totalAmount = 0;
+    purchase.items.forEach((item: any) => {
+      const unitCp = item.newCostPrice ?? item.previousCostPrice ?? 0;
+      totalAmount += (item.quantity || 0) * unitCp;
+    });
+    purchase.totalAmount = totalAmount;
+
+    await purchase.save();
+
+    const populatedPurchase = purchase.toObject();
+
+    if (io) {
+      io.to(`shop:${shopId}`).emit(
+        EVENTS_MAP.SUPPLIER_PURCHASE_UPDATED,
+        populatedPurchase,
+      );
+    }
+
+    return ApiResponse(
+      res,
+      200,
+      true,
+      "Item discarded successfully",
+      {
+        purchase: populatedPurchase,
+        purchaseRejected: false,
+      },
+    );
+  } catch (error: any) {
+    console.error("Error discarding purchase item:", error);
+    return ApiResponse(res, 500, false, error.message || "Server Error");
+  }
+};
+
 export const getAllSupplierPurchases = async (
   req: AuthenticatedRequest,
   res: Response,

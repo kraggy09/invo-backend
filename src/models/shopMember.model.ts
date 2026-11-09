@@ -24,7 +24,7 @@ const shopMemberSchema = new Schema<IShopMember>(
     roles: {
       type: [String],
       default: ["WORKER"],
-      enum: ["PLATFORM_ADMIN", "SUPER_ADMIN", "ADMIN", "WORKER", "SPECIAL_RIGHTS"],
+      enum: ["PLATFORM_ADMIN", "SUPER_ADMIN", "ADMIN", "WORKER", "SPECIAL_RIGHTS", "CREATOR"],
     },
     isActive: {
       type: Boolean,

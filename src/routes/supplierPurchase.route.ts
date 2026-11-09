@@ -4,6 +4,7 @@ import {
   acceptSupplierPurchase,
   approveSupplierPurchase,
   rejectSupplierPurchase,
+  discardSupplierPurchaseItem,
   getAllSupplierPurchases,
   getProductPurchaseHistory,
   getSingleSupplierPurchase,
@@ -38,6 +39,10 @@ supplierPurchaseRouter
 supplierPurchaseRouter
   .route("/:id/reject")
   .post(isAllowed(adminRoles), rejectSupplierPurchase);
+
+supplierPurchaseRouter
+  .route("/:id/items/:productId")
+  .delete(isAllowed(adminRoles), discardSupplierPurchaseItem);
 
 supplierPurchaseRouter
   .route("/:id")

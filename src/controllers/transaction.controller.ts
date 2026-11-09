@@ -5,6 +5,7 @@ import ApiResponse from "../utils/ApiResponse";
 import Transaction from "../models/transaction.model";
 import { ApiError, getCurrentDateAndTime } from "../utils";
 import Customer from "../models/customer.model";
+import Supplier from "../models/supplier.model";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 import { EVENTS_MAP } from "../constant/redisMap";
 import moment from "moment-timezone";
@@ -18,13 +19,25 @@ export const createNewTransaction = async (
   res: Response,
 ) => {
   const shopId = req.shopId!;
-  const { name, amount, purpose, transactionId, idempotencyKey } = req.body;
+  const {
+    name,
+    amount,
+    purpose,
+    transactionId,
+    idempotencyKey,
+    supplierId,
+    paymentMode,
+  } = req.body;
 
   if (idempotencyKey) {
     const existingTransaction = await Transaction.findOne({
       shopId,
       idempotencyKey,
-    });
+    })
+      .populate("supplier", "name phone address outstanding")
+      .populate("customer", "name phone")
+      .populate("approvedBy", "name username");
+
     if (existingTransaction) {
       return ApiResponse(
         res,
@@ -74,21 +87,53 @@ export const createNewTransaction = async (
         throw new Error("Error generating new transaction ID.");
       }
 
+      let supplierDoc: any = null;
+      let previousOutstanding: number | undefined = undefined;
+      let newOutstanding: number | undefined = undefined;
+
+      if (supplierId) {
+        supplierDoc = await Supplier.findOne({
+          _id: supplierId,
+          shopId,
+        }).session(session);
+
+        if (!supplierDoc) {
+          throw new Error("Supplier not found");
+        }
+
+        previousOutstanding = Number(supplierDoc.outstanding || 0);
+        newOutstanding = previousOutstanding - Number(amount);
+
+        // Deduct payment from supplier's outstanding balance
+        await Supplier.findOneAndUpdate(
+          { _id: supplierDoc._id, shopId },
+          { $inc: { outstanding: -Number(amount) } },
+          { session, new: true },
+        );
+      }
+
       // Create the new transaction with shopId
       const newTransaction = await Transaction.create(
         [
           {
             shopId,
             id: newTransactionId.value,
-            name,
-            amount,
+            name: supplierDoc ? supplierDoc.name : name,
+            amount: Number(amount),
             taken: true,
-            purpose,
+            purpose:
+              purpose ||
+              (supplierDoc ? "Supplier Outstanding Payment" : undefined),
             approved: true,
             approvedAt: moment.tz(getCurrentDateAndTime(), IST).toDate(),
             approvedBy: user?._id || user?.id,
             paymentIn: false,
-            paymentMode: "CASH",
+            paymentMode: paymentMode || "CASH",
+            supplier: supplierDoc ? supplierDoc._id : undefined,
+            previousOutstanding: supplierDoc
+              ? previousOutstanding
+              : undefined,
+            newOutstanding: supplierDoc ? newOutstanding : undefined,
             idempotencyKey,
           },
         ],
@@ -101,33 +146,74 @@ export const createNewTransaction = async (
 
       return {
         newTransaction: newTransaction[0],
+        supplierDoc,
+        newOutstanding,
       };
     });
 
+    const populatedTransaction = await Transaction.findById(
+      (result as any).newTransaction._id,
+    )
+      .populate("supplier", "name phone address outstanding")
+      .populate("customer", "name phone")
+      .populate("approvedBy", "name username")
+      .lean();
+
+    const finalTransaction =
+      populatedTransaction || (result as any).newTransaction;
+
     const io = req.app.get("io");
     if (io && result && (result as any).newTransaction) {
-      const transactionToEmit = (result as any).newTransaction;
       io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_CREATED, {
-        transaction: transactionToEmit,
-        transactionId: transactionToEmit.id,
+        transaction: finalTransaction,
+        transactionId: finalTransaction.id,
       });
+
+      if (supplierId) {
+        io.to(`shop:${shopId}`).emit(EVENTS_MAP.SUPPLIER_UPDATED, {
+          _id: supplierId,
+          outstanding: (result as any).newOutstanding,
+        });
+      }
     }
 
     const journeyData: any = {
       shopId: shopId.toString(),
       journeyLog: {
         eventType: "TRANSACTION_CREATED",
-        message: `Transaction #${(result as any)?.newTransaction?.id} of ₹${amount} created`,
+        message: supplierId
+          ? `Supplier Payment #${finalTransaction.id} of ₹${amount} made to ${finalTransaction.name}`
+          : `Transaction #${finalTransaction.id} of ₹${amount} created`,
         createdBy: (req.user as any)?._id || (req.user as any)?.id,
         entityType: "Transaction",
-        entityId: (result as any)?.newTransaction?._id,
+        entityId: finalTransaction._id,
         metadata: {
           amount,
-          purpose,
-          party: (result as any)?.newTransaction?.name,
+          purpose: finalTransaction.purpose,
+          party: finalTransaction.name,
+          paymentMode: finalTransaction.paymentMode,
+          supplierId: supplierId || undefined,
         },
       },
     };
+
+    if (supplierId) {
+      journeyData.supplierJourneyLog = {
+        supplierId,
+        eventType: "SUPPLIER_PAYMENT_CREATED",
+        message: `Payment #${finalTransaction.id} of ₹${amount} made to supplier ${finalTransaction.name}`,
+        createdBy: (req.user as any)?._id || (req.user as any)?.id,
+        amount: Number(amount),
+        previousOutstanding: (result as any)?.newTransaction?.previousOutstanding || 0,
+        outstanding: (result as any)?.newOutstanding || 0,
+        billId: finalTransaction._id,
+        metadata: {
+          paymentMode: finalTransaction.paymentMode,
+          purpose: finalTransaction.purpose,
+          paymentIn: false,
+        },
+      };
+    }
 
     if ((result as any)?.newTransaction?.customer) {
       journeyData.customerJourneyLog = {
@@ -140,7 +226,7 @@ export const createNewTransaction = async (
           (result as any)?.newTransaction?.previousOutstanding || 0,
         outstanding: (result as any)?.newTransaction?.newOutstanding || 0,
         billId: (result as any)?.newTransaction?._id,
-        metadata: { purpose, paymentIn: false, paymentMode: "CASH" },
+        metadata: { purpose, paymentIn: false, paymentMode: paymentMode || "CASH" },
       };
     }
 
@@ -149,7 +235,7 @@ export const createNewTransaction = async (
     session.endSession();
 
     return ApiResponse(res, 201, true, "Transaction added successfully", {
-      transaction: result as any,
+      transaction: { newTransaction: finalTransaction },
     });
   } catch (error: any) {
     console.error("Error:", error.message);
@@ -447,6 +533,23 @@ export const rejectTransaction = async (
     transaction.approvedBy = userId;
     await transaction.save();
 
+    if (transaction.supplier && transaction.approved) {
+      const updatedSupplier = await Supplier.findOneAndUpdate(
+        { _id: transaction.supplier, shopId },
+        { $inc: { outstanding: transaction.amount } },
+        { new: true },
+      );
+      if (updatedSupplier) {
+        const io = req.app.get("io");
+        if (io) {
+          io.to(`shop:${shopId}`).emit(EVENTS_MAP.SUPPLIER_UPDATED, {
+            _id: transaction.supplier,
+            outstanding: updatedSupplier.outstanding,
+          });
+        }
+      }
+    }
+
     const io = req.app.get("io");
     if (io) {
       io.to(`shop:${shopId}`).emit(EVENTS_MAP.TRANSACTION_UPDATED, {
@@ -617,6 +720,7 @@ export const getAllTransactionsInDateRange = async (
     const [transactions, total] = await Promise.all([
       Transaction.find(query)
         .populate("customer", "name phone")
+        .populate("supplier", "name phone address outstanding")
         .populate("approvedBy", "name username")
         .skip(skip)
         .limit(Number(limit))
@@ -715,7 +819,8 @@ export const getSingleTransaction = async (
     // IDOR prevention: must belong to this shop
     const transaction = await Transaction.findOne({ _id: id, shopId })
       .populate("approvedBy", "name username")
-      .populate("customer", "name phone");
+      .populate("customer", "name phone")
+      .populate("supplier", "name phone address outstanding");
     if (!transaction) {
       return ApiResponse(res, 404, false, "Transaction not found");
     }

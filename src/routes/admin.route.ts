@@ -12,14 +12,32 @@ import { isAllowed } from "../services/token.service";
 
 const adminRouter = express.Router();
 
-adminRouter.route("/users").post(addUserToCompany as any).get(getAllUsers as any);
-adminRouter.route("/users/:userId").delete(deleteUser as any);
-adminRouter.route("/dashboard").post(getAdminData as any);
-adminRouter.route("/acls").get(getAllAclRoles as any);
-adminRouter.route("/assign-role").post(assignRoleToUser as any);
+const adminRoles = ["PLATFORM_ADMIN", "SUPER_ADMIN", "ADMIN", "CREATOR"];
+
+adminRouter
+  .route("/users")
+  .post(isAllowed(adminRoles), addUserToCompany as any)
+  .get(isAllowed(adminRoles), getAllUsers as any);
+
+adminRouter
+  .route("/users/:userId")
+  .delete(isAllowed(adminRoles), deleteUser as any);
+
+adminRouter
+  .route("/dashboard")
+  .post(isAllowed(adminRoles), getAdminData as any);
+
+adminRouter
+  .route("/acls")
+  .get(isAllowed(adminRoles), getAllAclRoles as any);
+
+adminRouter
+  .route("/assign-role")
+  .post(isAllowed(adminRoles), assignRoleToUser as any);
+
 adminRouter
   .route("/customers/:id")
-  .put(isAllowed(["SUPER_ADMIN", "ADMIN"]), updateCustomer as any)
-  .patch(isAllowed(["SUPER_ADMIN", "ADMIN"]), updateCustomer as any);
+  .put(isAllowed(["SUPER_ADMIN", "ADMIN", "CREATOR"]), updateCustomer as any)
+  .patch(isAllowed(["SUPER_ADMIN", "ADMIN", "CREATOR"]), updateCustomer as any);
 
 export default adminRouter;

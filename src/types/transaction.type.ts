@@ -7,6 +7,7 @@ export interface ITransaction extends Document {
   previousOutstanding?: number;
   newOutstanding?: number;
   customer?: Schema.Types.ObjectId;
+  supplier?: Schema.Types.ObjectId;
   approved: boolean;
   approvedBy: Schema.Types.ObjectId;
   name: string;
@@ -18,5 +19,5 @@ export interface ITransaction extends Document {
   paymentIn: boolean;
   createdAt: Date;
   idempotencyKey?: string;
-  paymentMode: "CASH" | "ONLINE" | "PRODCT_RETURN";
+  paymentMode: "CASH" | "ONLINE" | "PRODUCT_RETURN" | "ADJUSTMENT";
 }

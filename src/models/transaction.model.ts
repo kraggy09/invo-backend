@@ -35,6 +35,10 @@ const transactionSchema = new Schema<ITransaction>(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Customer",
     },
+    supplier: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Supplier",
+    },
     approved: {
       type: Boolean,
       required: true,
@@ -94,6 +98,7 @@ const transactionSchema = new Schema<ITransaction>(
 // Compound unique indexes for multi-tenancy
 transactionSchema.index({ shopId: 1, id: 1 }, { unique: true });
 transactionSchema.index({ shopId: 1, customer: 1 });
+transactionSchema.index({ shopId: 1, supplier: 1 });
 transactionSchema.index({ shopId: 1, createdAt: -1 });
 transactionSchema.index(
   { shopId: 1, idempotencyKey: 1 },

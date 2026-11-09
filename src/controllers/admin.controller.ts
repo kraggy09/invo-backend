@@ -28,13 +28,83 @@ export const addUserToCompany = async (
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const { name, username, password, roles = ["WORKER"] } = req.body;
-    let user = await User.findOne({ username }).session(session);
+    const { name, username, password, roles, role, aclId } = req.body;
+
+    if (!username) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 400, false, "Username is required");
+    }
+
+    const normalizedUsername = String(username).trim().toLowerCase();
+
+    // Determine target roles
+    let targetRoles: string[] = [];
+    if (Array.isArray(roles) && roles.length > 0) {
+      targetRoles = roles.map((r: any) => String(r).trim().toUpperCase());
+    } else if (typeof role === "string" && role.trim()) {
+      targetRoles = [role.trim().toUpperCase()];
+    } else if (aclId) {
+      if (mongoose.Types.ObjectId.isValid(aclId)) {
+        const acl = await ACL.findById(aclId).session(session);
+        if (acl && acl.name) {
+          targetRoles = [acl.name.trim().toUpperCase()];
+        }
+      }
+      if (targetRoles.length === 0 && typeof aclId === "string") {
+        targetRoles = [aclId.trim().toUpperCase()];
+      }
+    }
+
+    if (targetRoles.length === 0) {
+      targetRoles = ["WORKER"];
+    }
+
+    // Role normalization map
+    const ROLE_MAP: Record<string, string> = {
+      CREATOR: "SUPER_ADMIN",
+      MANAGER: "ADMIN",
+      CASHIER: "WORKER",
+      VIEWER: "WORKER",
+      BILLING: "WORKER",
+    };
+    targetRoles = targetRoles.map((r) => ROLE_MAP[r] || r);
+
+    // Permission check: only SUPER_ADMIN, CREATOR, or PLATFORM_ADMIN can grant SUPER_ADMIN or CREATOR
+    const callerRoles = req.shopMember?.roles || [];
+    if (
+      (targetRoles.includes("SUPER_ADMIN") || targetRoles.includes("CREATOR")) &&
+      !callerRoles.includes("SUPER_ADMIN") &&
+      !callerRoles.includes("CREATOR") &&
+      !callerRoles.includes("PLATFORM_ADMIN")
+    ) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(
+        res,
+        403,
+        false,
+        "Only a SUPER_ADMIN can grant the SUPER_ADMIN role",
+      );
+    }
+
+    let user = await User.findOne({ username: normalizedUsername }).session(session);
 
     if (!user) {
+      if (!name) {
+        await session.abortTransaction();
+        session.endSession();
+        return ApiResponse(res, 400, false, "Name is required for new users");
+      }
+      if (!password) {
+        await session.abortTransaction();
+        session.endSession();
+        return ApiResponse(res, 400, false, "Password is required for new users");
+      }
+
       const hashedPassword = await bcrypt.hash(password, 10);
       const newUsers = await User.create(
-        [{ name, username, password: hashedPassword }],
+        [{ name: String(name).trim(), username: normalizedUsername, password: hashedPassword }],
         { session },
       );
 
@@ -44,6 +114,20 @@ export const addUserToCompany = async (
         return ApiResponse(res, 400, false, "Unable to create user");
       }
       user = newUsers[0];
+
+      // Sync ACLUser for backwards compatibility
+      let aclDoc = await ACL.findOne({ name: targetRoles[0] }).session(session);
+      if (!aclDoc) {
+        const createdAcls = await ACL.create(
+          [{ name: targetRoles[0], description: `${targetRoles[0]} role` }],
+          { session },
+        );
+        aclDoc = createdAcls[0];
+      }
+      await ACLUser.create(
+        [{ user: user._id, acl: aclDoc._id }],
+        { session },
+      );
     }
 
     // Check if user is already a member of this shop
@@ -52,21 +136,32 @@ export const addUserToCompany = async (
       shop: shopId,
     }).session(session);
 
-    if (existingMembership) {
-      await session.abortTransaction();
-      session.endSession();
-      return ApiResponse(
-        res,
-        409,
-        false,
-        "User is already a member of this shop",
-      );
-    }
+    let shopMemberRecord;
 
-    const shopMember = await ShopMember.create(
-      [{ shop: shopId, user: user._id, roles, isActive: true }],
-      { session },
-    );
+    if (existingMembership) {
+      if (existingMembership.isActive) {
+        await session.abortTransaction();
+        session.endSession();
+        return ApiResponse(
+          res,
+          409,
+          false,
+          "User is already an active member of this shop",
+        );
+      } else {
+        // Reactivate membership that was previously marked inactive
+        existingMembership.isActive = true;
+        existingMembership.roles = targetRoles;
+        await existingMembership.save({ session });
+        shopMemberRecord = existingMembership;
+      }
+    } else {
+      const createdMembers = await ShopMember.create(
+        [{ shop: shopId, user: user._id, roles: targetRoles, isActive: true }],
+        { session },
+      );
+      shopMemberRecord = createdMembers[0];
+    }
 
     await session.commitTransaction();
     session.endSession();
@@ -75,8 +170,8 @@ export const addUserToCompany = async (
     delete (userWithoutPassword as any).password;
 
     return ApiResponse(res, 201, true, "User added to shop successfully", {
-      user: { ...userWithoutPassword, roles },
-      membership: shopMember[0],
+      user: { ...userWithoutPassword, roles: targetRoles },
+      membership: shopMemberRecord,
     });
   } catch (error) {
     await session.abortTransaction();
@@ -92,16 +187,21 @@ export const getAllUsers = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const shopId = req.shopId;
 
-    const members = await ShopMember.find({ shop: shopId })
+    const members = await ShopMember.find({
+      shop: shopId,
+      isActive: { $ne: false },
+    })
       .populate("user", "-password")
       .lean();
 
-    const users = members.map((m: any) => ({
-      ...m.user,
-      roles: m.roles,
-      isActive: m.isActive,
-      membershipId: m._id,
-    }));
+    const users = members
+      .filter((m: any) => m.user && m.user._id)
+      .map((m: any) => ({
+        ...m.user,
+        roles: m.roles,
+        isActive: m.isActive,
+        membershipId: m._id,
+      }));
 
     return ApiResponse(res, 200, true, "Users found", { users });
   } catch (error) {
@@ -111,7 +211,16 @@ export const getAllUsers = async (req: AuthenticatedRequest, res: Response) => {
 
 export const getAllAclRoles = async (req: Request, res: Response) => {
   try {
-    const acls = await ACL.find();
+    let acls = await ACL.find();
+    if (!acls || acls.length === 0) {
+      const defaultRoles = [
+        { name: "ADMIN", description: "Admin with management permissions" },
+        { name: "WORKER", description: "Standard worker for billing and inventory operations" },
+        { name: "SPECIAL_RIGHTS", description: "Staff with special operational permissions" },
+        { name: "SUPER_ADMIN", description: "Full system and shop administrative control" },
+      ];
+      acls = await ACL.insertMany(defaultRoles);
+    }
     return ApiResponse(res, 200, true, "ACLs found", { acls });
   } catch (error) {
     return ApiResponse(res, 500, false, "Internal Server Error", error);
@@ -572,12 +681,62 @@ export const assignRoleToUser = async (
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const { userId, roles } = req.body;
+    const { userId, roles, role, aclId } = req.body;
 
-    if (!userId || !roles) {
+    if (!userId) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 400, false, "User ID and roles are required");
+      return ApiResponse(res, 400, false, "User ID is required");
+    }
+
+    let targetRoles: string[] = [];
+    if (Array.isArray(roles) && roles.length > 0) {
+      targetRoles = roles.map((r: any) => String(r).trim().toUpperCase());
+    } else if (typeof role === "string" && role.trim()) {
+      targetRoles = [role.trim().toUpperCase()];
+    } else if (aclId) {
+      if (mongoose.Types.ObjectId.isValid(aclId)) {
+        const acl = await ACL.findById(aclId).session(session);
+        if (acl && acl.name) {
+          targetRoles = [acl.name.trim().toUpperCase()];
+        }
+      }
+      if (targetRoles.length === 0 && typeof aclId === "string") {
+        targetRoles = [aclId.trim().toUpperCase()];
+      }
+    }
+
+    if (targetRoles.length === 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(res, 400, false, "Valid role or ACL is required");
+    }
+
+    const ROLE_MAP: Record<string, string> = {
+      CREATOR: "SUPER_ADMIN",
+      MANAGER: "ADMIN",
+      CASHIER: "WORKER",
+      VIEWER: "WORKER",
+      BILLING: "WORKER",
+    };
+    targetRoles = targetRoles.map((r) => ROLE_MAP[r] || r);
+
+    // Permission check for granting SUPER_ADMIN or CREATOR
+    const callerRoles = req.shopMember?.roles || [];
+    if (
+      (targetRoles.includes("SUPER_ADMIN") || targetRoles.includes("CREATOR")) &&
+      !callerRoles.includes("SUPER_ADMIN") &&
+      !callerRoles.includes("CREATOR") &&
+      !callerRoles.includes("PLATFORM_ADMIN")
+    ) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(
+        res,
+        403,
+        false,
+        "Only a SUPER_ADMIN can grant the SUPER_ADMIN role",
+      );
     }
 
     const user = await User.findById(userId).session(session);
@@ -590,7 +749,7 @@ export const assignRoleToUser = async (
     // Update ShopMember roles for this shop
     const membership = await ShopMember.findOneAndUpdate(
       { user: userId, shop: shopId },
-      { $set: { roles } },
+      { $set: { roles: targetRoles, isActive: true } },
       { new: true, session },
     );
 
@@ -599,6 +758,21 @@ export const assignRoleToUser = async (
       session.endSession();
       return ApiResponse(res, 404, false, "User is not a member of this shop");
     }
+
+    // Sync ACLUser for backwards compatibility
+    let aclDoc = await ACL.findOne({ name: targetRoles[0] }).session(session);
+    if (!aclDoc) {
+      const createdAcls = await ACL.create(
+        [{ name: targetRoles[0], description: `${targetRoles[0]} role` }],
+        { session }
+      );
+      aclDoc = createdAcls[0];
+    }
+    await ACLUser.findOneAndUpdate(
+      { user: userId },
+      { acl: aclDoc._id },
+      { upsert: true, session }
+    );
 
     await session.commitTransaction();
     session.endSession();
@@ -626,11 +800,33 @@ export const deleteUser = async (req: AuthenticatedRequest, res: Response) => {
       return ApiResponse(res, 400, false, "User ID is required");
     }
 
-    const user = await User.findById(userId).session(session);
-    if (!user) {
+    // Cannot delete yourself
+    if (req.user?._id?.toString() === userId.toString()) {
       await session.abortTransaction();
       session.endSession();
-      return ApiResponse(res, 404, false, "User not found");
+      return ApiResponse(res, 400, false, "You cannot delete your own account");
+    }
+
+    // Check if user is shop owner
+    const shop = await Shop.findById(shopId).session(session);
+    if (shop && shop.owner && shop.owner.toString() === userId.toString()) {
+      await session.abortTransaction();
+      session.endSession();
+      return ApiResponse(
+        res,
+        400,
+        false,
+        "Cannot delete the owner of the shop",
+      );
+    }
+
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      // Clean up any dangling ShopMember records for this shop
+      await ShopMember.deleteMany({ user: userId, shop: shopId }).session(session);
+      await session.commitTransaction();
+      session.endSession();
+      return ApiResponse(res, 200, true, "User deleted successfully");
     }
 
     // Find membership for this shop
@@ -638,6 +834,7 @@ export const deleteUser = async (req: AuthenticatedRequest, res: Response) => {
       user: userId,
       shop: shopId,
     }).session(session);
+
     if (!membership) {
       await session.abortTransaction();
       session.endSession();
@@ -658,17 +855,27 @@ export const deleteUser = async (req: AuthenticatedRequest, res: Response) => {
       );
     }
 
-    // Deactivate membership instead of deleting user account (user may belong to other shops)
-    await ShopMember.findOneAndUpdate(
-      { user: userId, shop: shopId },
-      { isActive: false },
-      { session },
-    );
+    // Actually delete the membership from this shop (no fake delete)
+    await ShopMember.deleteMany({
+      user: userId,
+      shop: shopId,
+    }).session(session);
+
+    // Check if this user belongs to any other shop
+    const remainingMembershipsCount = await ShopMember.countDocuments({
+      user: userId,
+    }).session(session);
+
+    // If user has no other shops, completely remove the user account and ACLs
+    if (remainingMembershipsCount === 0) {
+      await User.findByIdAndDelete(userId).session(session);
+      await ACLUser.deleteMany({ user: userId }).session(session);
+    }
 
     await session.commitTransaction();
     session.endSession();
 
-    return ApiResponse(res, 200, true, "User removed from shop successfully");
+    return ApiResponse(res, 200, true, "User deleted successfully");
   } catch (error) {
     await session.abortTransaction();
     session.endSession();

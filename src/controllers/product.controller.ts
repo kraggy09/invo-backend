@@ -1,8 +1,14 @@
+import mongoose from "mongoose";
 import axios from "axios";
 import { Response } from "express";
 import Product from "../models/product.model";
 import Shop from "../models/shop.model";
 import PriceHistory from "../models/priceHistory.model";
+import Supplier from "../models/supplier.model";
+import SupplierPurchase from "../models/supplierPurchase.model";
+import Stock from "../models/stock.model";
+import Transaction from "../models/transaction.model";
+import Counter from "../models/counter.model";
 import ApiResponse from "../utils/ApiResponse";
 import { AuthenticatedRequest } from "../utils/AuthenticatedRequest";
 
@@ -14,6 +20,11 @@ const IST = "Asia/Kolkata"; // Update with the correct path
 export const createNewProduct = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const shopId = req.shopId!;
+    const userId = req.user?.id || req.user?._id;
+
+    const adminRoles = ["SUPER_ADMIN", "ADMIN", "CREATOR"];
+    const userRoles = req.shopMember?.roles || req.user?.roles || [];
+    const isAdmin = userRoles.some((role: string) => adminRoles.includes(role));
 
     let {
       name,
@@ -30,6 +41,9 @@ export const createNewProduct = async (req: AuthenticatedRequest, res: Response)
       box,
       minQuantity,
       idempotencyKey,
+      supplierId,
+      paymentMode,
+      isAutoBarcode,
     } = req.body;
 
     if (idempotencyKey) {
@@ -41,8 +55,24 @@ export const createNewProduct = async (req: AuthenticatedRequest, res: Response)
       }
     }
 
+    let supplierDoc: any = null;
+    if (supplierId) {
+      if (!mongoose.Types.ObjectId.isValid(supplierId)) {
+        return ApiResponse(res, 400, false, "Invalid supplier ID");
+      }
+      supplierDoc = await Supplier.findOne({ _id: supplierId, shopId });
+      if (!supplierDoc) {
+        return ApiResponse(res, 404, false, "Supplier not found");
+      }
+    }
+
     const shop = await Shop.findById(shopId).select("settings");
     const isRetailOnly = shop?.settings?.pricingMode === "RETAIL_ONLY";
+    const currentShopBarcode = shop?.settings?.currentBarcode ?? 1000;
+
+    if ((barcode === undefined || barcode === null || (Array.isArray(barcode) && barcode.length === 0)) && isAutoBarcode) {
+      barcode = [currentShopBarcode];
+    }
 
     const requiredFields = isRetailOnly
       ? [
@@ -107,7 +137,7 @@ export const createNewProduct = async (req: AuthenticatedRequest, res: Response)
         ? category.trim().toLowerCase()
         : null;
 
-    let newOne;
+    let newOne: any;
     const get_base_url = (lang: "hi", word: string) =>
       `https://www.google.com/inputtools/request?ime=transliteration_en_${lang}&num=5&cp=0&cs=0&ie=utf-8&oe=utf-8&app=jsapi&text=${word}`;
 
@@ -127,6 +157,11 @@ export const createNewProduct = async (req: AuthenticatedRequest, res: Response)
       barcode = [barcode];
     }
     name = name.toLowerCase();
+
+    const numericBarcodes = barcode.map((b: any) => Number(b));
+    const isShopAutoBarcode = Boolean(
+      isAutoBarcode || numericBarcodes.includes(Number(currentShopBarcode))
+    );
 
     // Barcode and name uniqueness is scoped PER SHOP
     const productBarcode = await Product.findOne({
@@ -155,29 +190,393 @@ export const createNewProduct = async (req: AuthenticatedRequest, res: Response)
       });
     }
 
-    // Create new product with shopId
-    const newProduct = await Product.create({
-      shopId,
-      name,
-      barcode,
-      mrp,
-      costPrice,
-      retailPrice,
-      wholesalePrice,
-      superWholesalePrice,
-      measuring,
-      stock,
-      packet,
-      box,
-      minQuantity,
-      hi: newOne ? newOne[0] : name,
-      category: sanitizedCategory,
-      idempotencyKey,
-    });
+    const requestedStock = Number(stock) || 0;
+    // If user is not admin and stock > 0, stock is initialized to 0 pending admin approval
+    const initialStock = !isAdmin && requestedStock > 0 ? 0 : requestedStock;
+
+    const session = await mongoose.startSession();
+    let newProduct: any = null;
+    let purchaseDoc: any = null;
+    let createdTx: any = null;
+    let stockDoc: any = null;
+    let nextBarcodeValue = currentShopBarcode;
+
+    try {
+      await session.withTransaction(async () => {
+        // Create new product with shopId
+        const createdProducts = await Product.create(
+          [
+            {
+              shopId,
+              name,
+              barcode,
+              mrp,
+              costPrice,
+              retailPrice,
+              wholesalePrice,
+              superWholesalePrice,
+              measuring,
+              stock: initialStock,
+              packet,
+              box,
+              minQuantity,
+              hi: newOne ? newOne[0] : name,
+              category: sanitizedCategory,
+              idempotencyKey,
+            },
+          ],
+          { session }
+        );
+        newProduct = createdProducts[0];
+
+        // Increment shop-wide auto barcode sequence if auto barcode was used
+        if (isShopAutoBarcode) {
+          nextBarcodeValue = currentShopBarcode + 1;
+          while (await Product.findOne({ shopId, barcode: nextBarcodeValue }).session(session)) {
+            nextBarcodeValue++;
+          }
+          await Shop.findByIdAndUpdate(
+            shopId,
+            { $set: { "settings.currentBarcode": nextBarcodeValue } },
+            { session }
+          );
+        }
+
+        // 1. If Supplier is provided and requested stock > 0
+        if (supplierDoc && requestedStock > 0) {
+          const totalAmount = requestedStock * Number(costPrice);
+          const pMode = paymentMode === "CREDIT" ? "CREDIT" : "CASH";
+
+          if (!isAdmin) {
+            // Non-admin user: Create purchase with status "ACCEPTED" awaiting Admin approval
+            const createdPurchases = await SupplierPurchase.create(
+              [
+                {
+                  shopId,
+                  supplier: supplierDoc._id,
+                  status: "ACCEPTED",
+                  raisedBy: userId,
+                  raisedAt: new Date(),
+                  acceptedBy: userId,
+                  acceptedAt: new Date(),
+                  items: [
+                    {
+                      product: newProduct._id,
+                      quantity: requestedStock,
+                      previousCostPrice: Number(costPrice),
+                      newCostPrice: Number(costPrice),
+                      previousRetailPrice: Number(retailPrice),
+                      newRetailPrice: Number(retailPrice),
+                      previousWholesalePrice: Number(wholesalePrice || retailPrice),
+                      newWholesalePrice: Number(wholesalePrice || retailPrice),
+                      previousSuperWholesalePrice: Number(superWholesalePrice || retailPrice),
+                      newSuperWholesalePrice: Number(superWholesalePrice || retailPrice),
+                      priceUpdated: false,
+                    },
+                  ],
+                  totalAmount,
+                  paymentMode: pMode,
+                },
+              ],
+              { session }
+            );
+            purchaseDoc = createdPurchases[0];
+          } else {
+            // Admin user: Direct approved purchase with stock and ledger updates
+            const cashPaid = pMode === "CASH" ? totalAmount : 0;
+            const creditAmount = pMode === "CREDIT" ? totalAmount : 0;
+            const prevOutstanding = supplierDoc.outstanding || 0;
+            const newOutstanding = prevOutstanding + creditAmount;
+
+            if (creditAmount > 0) {
+              supplierDoc.outstanding = newOutstanding;
+              await supplierDoc.save({ session });
+            }
+
+            const createdPurchases = await SupplierPurchase.create(
+              [
+                {
+                  shopId,
+                  supplier: supplierDoc._id,
+                  status: "APPROVED",
+                  raisedBy: userId,
+                  raisedAt: new Date(),
+                  acceptedBy: userId,
+                  acceptedAt: new Date(),
+                  approvedBy: userId,
+                  approvedAt: new Date(),
+                  items: [
+                    {
+                      product: newProduct._id,
+                      quantity: requestedStock,
+                      previousCostPrice: Number(costPrice),
+                      newCostPrice: Number(costPrice),
+                      previousRetailPrice: Number(retailPrice),
+                      newRetailPrice: Number(retailPrice),
+                      previousWholesalePrice: Number(wholesalePrice || retailPrice),
+                      newWholesalePrice: Number(wholesalePrice || retailPrice),
+                      previousSuperWholesalePrice: Number(superWholesalePrice || retailPrice),
+                      newSuperWholesalePrice: Number(superWholesalePrice || retailPrice),
+                      priceUpdated: false,
+                    },
+                  ],
+                  totalAmount,
+                  paymentMode: pMode,
+                  cashPaid,
+                  creditAmount,
+                  previousSupplierOutstanding: prevOutstanding,
+                  newSupplierOutstanding: newOutstanding,
+                },
+              ],
+              { session }
+            );
+            purchaseDoc = createdPurchases[0];
+
+            if (cashPaid > 0) {
+              const counter = await Counter.findOneAndUpdate(
+                { shopId, name: "transactionId" },
+                { $inc: { value: 1 } },
+                { session, new: true, upsert: true }
+              );
+
+              const createdTxs = await Transaction.create(
+                [
+                  {
+                    shopId,
+                    id: counter.value,
+                    name: supplierDoc.name,
+                    supplier: supplierDoc._id,
+                    supplierPurchaseId: purchaseDoc._id,
+                    previousOutstanding: prevOutstanding,
+                    newOutstanding: prevOutstanding,
+                    amount: cashPaid,
+                    taken: true,
+                    paymentIn: false,
+                    purpose: `Supplier Purchase #${String(purchaseDoc._id).slice(-6)} Payment`,
+                    approved: true,
+                    approvedAt: new Date(),
+                    approvedBy: userId,
+                    paymentMode: "CASH",
+                    date: new Date().toISOString(),
+                  },
+                ],
+                { session }
+              );
+              createdTx = createdTxs[0];
+            }
+
+            // Stock audit log
+            const stockDocs = await Stock.create(
+              [
+                {
+                  shopId,
+                  date: new Date(),
+                  createdBy: userId,
+                  actionBy: userId,
+                  actionAt: new Date(),
+                  product: newProduct._id,
+                  oldStock: 0,
+                  quantity: requestedStock,
+                  stockAtUpdate: 0,
+                  newStock: requestedStock,
+                  approved: true,
+                  rejected: false,
+                  purpose: "SUPPLIER_PURCHASE",
+                },
+              ],
+              { session }
+            );
+            stockDoc = stockDocs[0];
+
+            // Price history record
+            await PriceHistory.create(
+              [
+                {
+                  shopId,
+                  product: newProduct._id,
+                  changedAt: new Date(),
+                  changedBy: userId,
+                  source: "SUPPLIER_PURCHASE",
+                  supplierPurchase: purchaseDoc._id,
+                  supplier: supplierDoc._id,
+                  previousCostPrice: 0,
+                  newCostPrice: Number(costPrice),
+                  previousRetailPrice: 0,
+                  newRetailPrice: Number(retailPrice),
+                  previousWholesalePrice: 0,
+                  newWholesalePrice: Number(wholesalePrice || retailPrice),
+                  previousSuperWholesalePrice: 0,
+                  newSuperWholesalePrice: Number(superWholesalePrice || retailPrice),
+                },
+              ],
+              { session }
+            );
+          }
+        } else if (!supplierDoc && requestedStock > 0) {
+          // 2. No supplier specified, but initial stock entered
+          if (!isAdmin) {
+            // Non-admin: Create stock update request awaiting Admin approval
+            const stockDocs = await Stock.create(
+              [
+                {
+                  shopId,
+                  createdBy: userId,
+                  approved: false,
+                  rejected: false,
+                  product: newProduct._id,
+                  oldStock: 0,
+                  quantity: requestedStock,
+                  newStock: requestedStock,
+                  purpose: "STOCK_UPDATE",
+                },
+              ],
+              { session }
+            );
+            stockDoc = stockDocs[0];
+          } else {
+            // Admin: Direct stock audit log
+            const stockDocs = await Stock.create(
+              [
+                {
+                  shopId,
+                  date: new Date(),
+                  createdBy: userId,
+                  actionBy: userId,
+                  actionAt: new Date(),
+                  product: newProduct._id,
+                  oldStock: 0,
+                  quantity: requestedStock,
+                  stockAtUpdate: 0,
+                  newStock: requestedStock,
+                  approved: true,
+                  rejected: false,
+                  purpose: "STOCK_UPDATE",
+                },
+              ],
+              { session }
+            );
+            stockDoc = stockDocs[0];
+          }
+        }
+      });
+    } finally {
+      session.endSession();
+    }
 
     const io = req.app.get("io");
     if (io) {
       io.to(`shop:${shopId}`).emit(EVENTS_MAP.PRODUCT_CREATED, newProduct);
+
+      if (purchaseDoc && supplierDoc) {
+        const user = req.user;
+        const populatedPurchase = {
+          ...purchaseDoc.toObject(),
+          supplier: {
+            _id: supplierDoc._id,
+            name: supplierDoc.name,
+            phone: supplierDoc.phone,
+            outstanding: supplierDoc.outstanding,
+          },
+          raisedBy: user
+            ? { _id: user._id, name: user.name, username: user.username }
+            : { _id: userId },
+          acceptedBy: user
+            ? { _id: user._id, name: user.name, username: user.username }
+            : { _id: userId },
+          approvedBy: isAdmin && user
+            ? { _id: user._id, name: user.name, username: user.username }
+            : undefined,
+          items: [
+            {
+              ...purchaseDoc.items[0].toObject(),
+              product: {
+                _id: newProduct._id,
+                name: newProduct.name,
+                barcode: newProduct.barcode,
+                measuring: newProduct.measuring,
+                mrp: newProduct.mrp,
+                costPrice: newProduct.costPrice,
+                retailPrice: newProduct.retailPrice,
+                wholesalePrice: newProduct.wholesalePrice,
+                superWholesalePrice: newProduct.superWholesalePrice,
+                stock: newProduct.stock,
+                packet: newProduct.packet,
+                box: newProduct.box,
+              },
+            },
+          ],
+        };
+
+        io.to(`shop:${shopId}`).emit(
+          EVENTS_MAP.SUPPLIER_PURCHASE_CREATED,
+          populatedPurchase
+        );
+
+        if (!isAdmin) {
+          io.to(`shop:${shopId}`).emit(
+            EVENTS_MAP.SUPPLIER_PURCHASE_ACCEPTED,
+            populatedPurchase
+          );
+        } else {
+          io.to(`shop:${shopId}`).emit(
+            EVENTS_MAP.SUPPLIER_PURCHASE_APPROVED,
+            populatedPurchase
+          );
+
+          if (stockDoc) {
+            const stockPayload = {
+              action: "acceptAll",
+              data: {
+                updatedProducts: [
+                  {
+                    productId: newProduct._id.toString(),
+                    previousStock: 0,
+                    newStock: requestedStock,
+                    quantityAdded: requestedStock,
+                    costPrice: newProduct.costPrice,
+                    retailPrice: newProduct.retailPrice,
+                    wholesalePrice: newProduct.wholesalePrice,
+                    superWholesalePrice: newProduct.superWholesalePrice,
+                  },
+                ],
+                stockDocs: [stockDoc],
+                updatedRequests: [stockDoc],
+              },
+            };
+            io.to(`shop:${shopId}`).emit("INVENTORY_UPDATED", stockPayload);
+            io.to(`shop:${shopId}`).emit(EVENTS_MAP.STOCK_UPDATED, stockPayload);
+          }
+
+          if (supplierDoc.outstanding !== undefined) {
+            io.to(`shop:${shopId}`).emit(
+              EVENTS_MAP.SUPPLIER_UPDATED,
+              supplierDoc
+            );
+          }
+
+          if (createdTx) {
+            io.to(`shop:${shopId}`).emit(
+              EVENTS_MAP.TRANSACTION_CREATED,
+              createdTx
+            );
+          }
+        }
+      } else if (!supplierDoc && requestedStock > 0 && !isAdmin && stockDoc) {
+        const populatedStockReq = {
+          ...stockDoc.toObject(),
+          product: { _id: newProduct._id, name: newProduct.name, stock: 0 },
+          createdBy: req.user
+            ? { _id: req.user._id, name: req.user.name, username: req.user.username }
+            : { _id: userId },
+        };
+        io.to(`shop:${shopId}`).emit("INVENTORY_UPDATE_REQUEST", [populatedStockReq]);
+      }
+
+      if (isShopAutoBarcode) {
+        io.to(`shop:${shopId}`).emit(EVENTS_MAP.SHOP_SETTINGS_UPDATED, {
+          currentBarcode: nextBarcodeValue,
+        });
+      }
     }
 
     journeyQueue.add("product-created", {
@@ -188,13 +587,40 @@ export const createNewProduct = async (req: AuthenticatedRequest, res: Response)
         createdBy: req.user?._id || null,
         entityType: "Product",
         entityId: newProduct._id,
-        metadata: { mrp: newProduct.mrp, stock: newProduct.stock }
-      }
+        metadata: { mrp: newProduct.mrp, stock: newProduct.stock },
+      },
     });
 
+    if (purchaseDoc) {
+      journeyQueue.add(isAdmin ? "supplier-purchase-approved" : "supplier-purchase-created", {
+        shopId: shopId.toString(),
+        journeyLog: {
+          eventType: isAdmin ? "SUPPLIER_PURCHASE_APPROVED" : "SUPPLIER_PURCHASE_ACCEPTED",
+          message: `Supplier purchase for new product ${newProduct.name} ${isAdmin ? "approved" : "created (accepted)"}`,
+          createdBy: userId,
+          entityType: "SupplierPurchase",
+          entityId: purchaseDoc._id,
+          metadata: {
+            supplierId: supplierDoc?._id,
+            totalAmount: purchaseDoc.totalAmount,
+            status: purchaseDoc.status,
+          },
+        },
+      });
+    }
+
+    let successMessage = "Product created successfully";
+    if (!isAdmin && requestedStock > 0) {
+      successMessage = supplierDoc
+        ? "Product created. Supplier purchase request sent to Admin for approval."
+        : "Product created. Stock update request sent to Admin for approval.";
+    }
+
     // Return response
-    return ApiResponse(res, 201, true, `Product created successfully`, {
+    return ApiResponse(res, 201, true, successMessage, {
       product: newProduct,
+      purchase: purchaseDoc,
+      currentBarcode: isShopAutoBarcode ? nextBarcodeValue : currentShopBarcode,
     });
   } catch (error: any) {
     return ApiResponse(res, 500, false, `Internal Server Error`, {

@@ -1,5 +1,5 @@
 import express from "express";
-import { createShop, getAllShops, getShopProfile, updateShopSettings } from "../controllers/shop.controller";
+import { createShop, getAllShops, getShopProfile, updateShopSettings, getNextBarcode } from "../controllers/shop.controller";
 import { verifyToken, isAllowed } from "../services/token.service";
 
 const shopRouter = express.Router();
@@ -12,5 +12,6 @@ shopRouter.route("/").get(getAllShops);
 // Tenant-level: shop profile and settings (requires auth + SUPER_ADMIN role)
 shopRouter.route("/profile").get(verifyToken, getShopProfile);
 shopRouter.route("/settings").put(verifyToken, isAllowed(["SUPER_ADMIN", "ADMIN"]), updateShopSettings);
+shopRouter.route("/next-barcode").get(verifyToken, getNextBarcode);
 
 export default shopRouter;

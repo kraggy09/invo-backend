@@ -13,6 +13,7 @@ export interface IShop extends Document {
     invoicePrefix: string;
     lowStockAlert: number;
     discordWebhookUrl?: string;
+    currentBarcode?: number;
     pricingMode?: "RETAIL_ONLY" | "MULTI_TIER";
     printType?: "A4" | "THERMAL";
   };
@@ -58,6 +59,7 @@ const shopSchema = new Schema<IShop>(
       invoicePrefix: { type: String, default: "INV" },
       lowStockAlert: { type: Number, default: 10 },
       discordWebhookUrl: { type: String },
+      currentBarcode: { type: Number, default: 1000 },
       pricingMode: {
         type: String,
         enum: ["RETAIL_ONLY", "MULTI_TIER"],
@@ -70,7 +72,7 @@ const shopSchema = new Schema<IShop>(
       },
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const Shop = mongoose.model<IShop>("Shop", shopSchema);
